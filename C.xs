@@ -3,21 +3,12 @@
 #include <perl.h>
 #include <XSUB.h>
 
-#ifdef __cplusplus
-/* Static OP* initialization 2x */
-# error B-C cannot yet be compiled with C++
-#endif
-
 #ifndef PM_GETRE
 # if defined(USE_ITHREADS) && (PERL_VERSION > 8)
 #  define PM_GETRE(o)     (INT2PTR(REGEXP*,SvIVX(PL_regex_pad[(o)->op_pmoffset])))
 # else
 #  define PM_GETRE(o)     ((o)->op_pmregexp)
 # endif
-#endif
-/* for < 5.10 */
-#if defined(DEBUGGING) && !defined(RX_WRAPPED)
-# define RX_WRAPPED(rx)	((rx)->subbeg)
 #endif
 /* hack for 5.6.2: just want to know if PMf_ONCE or 0 */
 #ifndef PmopSTASHPV
@@ -26,34 +17,12 @@
 #ifndef RX_EXTFLAGS
 # define RX_EXTFLAGS(prog) ((prog)->extflags)
 #endif
-/* added with v5.21.11/v5.22.1c, removed with v5.29.8/v5.29.2c */
-#ifndef _OP_SIBPARENT_FIELDNAME
-# ifdef PERL_OP_PARENT
-#  define _OP_SIBPARENT_FIELDNAME op_sibparent
-# else
-#  define _OP_SIBPARENT_FIELDNAME op_sibling
-# endif
-#endif
-
-#if PERL_VERSION < 10
-#undef  MY_CXT_INIT
-#define MY_CXT_INIT
-#endif
 
 #if PERL_VERSION > 17 && (PERL_VERSION < 19 || (PERL_VERSION == 19 && PERL_SUBVERSION < 4))
 #define need_op_slabbed
 #endif
 #if PERL_VERSION == 19 && (PERL_SUBVERSION > 2 && PERL_SUBVERSION <= 4)
 #define need_op_folded
-#endif
-#if !defined(USE_ITHREADS) || (PERL_VERSION >= 10 && PERL_VERSION < 20)
-#define need_make_sv_object
-#endif
-#if PERL_VERSION >= 10 && PERL_VERSION < 20
-#define need_HvARRAY_utf8
-#endif
-#if (PERL_VERSION >= 15) && defined(USE_ITHREADS) && defined(CopSTASH_flags)
-#define need_COP_stashflags
 #endif
 
 typedef struct magic  *B__MAGIC;
@@ -80,7 +49,6 @@ typedef struct {
 
 #if PERL_VERSION >= 10
 
-#ifdef need_make_sv_object
 static const char* const svclassnames[] = {
     "B::NULL",
 #if PERL_VERSION < 19
@@ -109,7 +77,6 @@ static const char* const svclassnames[] = {
     "B::FM",
     "B::IO",
 };
-#endif
 
 #define MY_CXT_KEY "B::C::_guts" XS_VERSION
 
@@ -122,8 +89,6 @@ START_MY_CXT
 
 #define walkoptree_debug	(MY_CXT.x_walkoptree_debug)
 #define specialsv_list		(MY_CXT.x_specialsv_list)
-
-#ifdef need_make_sv_object
 
 static SV *
 make_sv_object(pTHX_ SV *sv)
@@ -148,14 +113,12 @@ make_sv_object(pTHX_ SV *sv)
 }
 
 #endif
-#endif
 
 static int
 my_runops(pTHX)
 {
     HV* regexp_hv = get_hv( "B::C::Regexp", GV_ADD );
     SV* key = newSViv( 0 );
-    int type;
 
     DEBUG_l(Perl_deb(aTHX_ "Entering new RUNOPS level (B::C)\n"));
     do {
@@ -166,7 +129,7 @@ my_runops(pTHX)
 	if (PL_debug) {
 	    if (PL_watchaddr && (*PL_watchaddr != PL_watchok))
 		PerlIO_printf(Perl_debug_log,
-			      "WARNING: %" UVxf " changed from %" UVxf " to %" UVxf "\n",
+			      "WARNING: %"UVxf" changed from %"UVxf" to %"UVxf"\n",
 			      PTR2UV(PL_watchaddr), PTR2UV(PL_watchok),
 			      PTR2UV(*PL_watchaddr));
 #if defined(DEBUGGING) \
@@ -182,21 +145,14 @@ my_runops(pTHX)
 	}
 
         /* Need to store the rx all for QR PMOPs in a global %Regexp hash. MATCH once also */
-        type = PL_op->op_type;
 #if 1
-        if (type == OP_QR
-        || (type == OP_MATCH
-# if PERL_VERSION < 20
-            && (((PMOP*)PL_op)->op_pmflags & PMf_ONCE)
-# else
-            && PmopSTASH((PMOP*)PL_op)
-# endif
-            ))
+        if ((PL_op->op_type == OP_QR)
+        || ((PL_op->op_type == OP_MATCH) && PmopSTASHPV((PMOP*)PL_op)))
 #else
-        if ((type == OP_QR)
-         || (type == OP_MATCH)
-         || (type == OP_PUSHRE)
-         || (type == OP_SUBST))
+        if ((PL_op->op_type == OP_QR)
+         || (PL_op->op_type == OP_MATCH)
+         || (PL_op->op_type == OP_PUSHRE)
+         || (PL_op->op_type == OP_SUBST))
 #endif
         {
             PMOP* op;
@@ -207,7 +163,7 @@ my_runops(pTHX)
             Copy( PL_op, op, 1, PMOP );
             /* we need just the flags */
             op->op_next = NULL;
-            op->_OP_SIBPARENT_FIELDNAME = NULL;
+            op->op_sibling = NULL;
             op->op_first = NULL;
             op->op_last = NULL;
 
@@ -225,9 +181,7 @@ my_runops(pTHX)
             sv_setiv( key, PTR2IV( rx ) );
             sv_setref_iv( rv, "B::PMOP", PTR2IV( op ) );
 #if defined(DEBUGGING) && (PERL_VERSION > 7)
-	    if (DEBUG_D_TEST_) fprintf(stderr, "pmop %p => rx %s %p 0x%x %s\n",
-                                       op, PL_op_name[type], rx, (unsigned)op->op_pmflags,
-                                       RX_WRAPPED(rx));
+	    if (DEBUG_D_TEST_) fprintf(stderr, "pmop %p => rx %p\n", op, rx);
 #endif
             hv_store_ent( regexp_hv, key, rv, 0 );
         }
@@ -267,15 +221,8 @@ MODULE = B	PACKAGE = B::PMOP
 
 SV*
 precomp(o)
-          B::OP o
-PPCODE:
-  {
-    if (SvROK(ST(0))) {
-      IV tmp = SvIV((SV*)SvRV(ST(0)));
-      o = INT2PTR(B__OP,tmp);
-    }
-    else
-      croak("precomp(o) argument is not a reference");
+      B::OP o
+  PPCODE:
     if (o) {
       REGEXP *rx = PM_GETRE(cPMOPo);
       if (!rx)
@@ -285,19 +232,10 @@ PPCODE:
     } else {
       XSRETURN_UNDEF;
     }
-  }
 
 #endif
 
 MODULE = B      PACKAGE = B::HV
-
-IV
-Gv_AMG(stash)
-    B::HV stash
-CODE:
-    RETVAL = (!SvREADONLY(stash) && Gv_AMG(stash)) ? 1 : 0;
-OUTPUT:
-    RETVAL
 
 #if PERL_VERSION > 13
 
@@ -308,7 +246,6 @@ ENAMES(hv)
 PPCODE:
     if (SvOOK(hv)) {
       if (HvENAME_HEK(hv)) {
-        I32 i = 0;
         const I32 count = HvAUX(hv)->xhv_name_count;
         if (count) {
           HEK** names = HvAUX(hv)->xhv_name_u.xhvnameu_names;
@@ -319,9 +256,8 @@ PPCODE:
             PUSHs(newSVpvn_flags(HEK_KEY(*hekp), HEK_LEN(*hekp),
                                  HEK_UTF8(*hekp) ? SVf_UTF8|SVs_TEMP : SVs_TEMP));
             ++hekp;
-            i++;
           }
-          XSRETURN(i);
+          XSRETURN(count < 0 ? -count : count);
         }
         else {
           HEK *const hek = HvENAME_HEK_NN(hv);
@@ -337,256 +273,26 @@ I32
 name_count(hv)
     B::HV hv
 PPCODE:
-    PERL_UNUSED_VAR(RETVAL);
-    PERL_UNUSED_VAR(TARG);
     if (SvOOK(hv))
-      mPUSHi(HvAUX(hv)->xhv_name_count);
+      PUSHi(HvAUX(hv)->xhv_name_count);
     else 
-      mPUSHi(0);
-    XSRETURN(1);
+      PUSHi(0);
 
 #endif
 
-MODULE = B	PACKAGE = B::UNOP_AUX
-
-#if PERL_VERSION > 21
+#if PERL_VERSION > 17
 
 SV*
-aux(o)
-          B::OP o
-CODE:
-  {
-    UNOP_AUX_item *items = cUNOP_AUXo->op_aux;
-    UV len = items[-1].uv;
-    RETVAL = newSVpvn_flags((char*)&items[-1], (1+len) * sizeof(UNOP_AUX_item), 0);
-  }
-OUTPUT:
-    RETVAL
-
-# Needed only for the ill-designed perl5 signatures: argelem
-SV*
-aux_ptr2iv(o)
-          B::OP o
-  CODE:
-    RETVAL = newSViv(PTR2IV(cUNOP_AUXo->op_aux));
-  OUTPUT:
-    RETVAL
-
-# Return the contents of the op_aux array as a list of IV/SV/GV/PADOFFSET objects.
-# This version here returns the padoffset of SV/GV under ithreads, and not the
-# SV/GV itself. It also uses simplified mPUSH macros.
-# With MCONCAT contrary to B::aux_list always return both slots, binary and utf8.
-# The design of the upstream aux_list method deviates significantly from proper B design.
-
-void
-aux_list_thr(o)
-	B::OP  o
-    PPCODE:
-        PERL_UNUSED_VAR(cv); /* not needed on unthreaded builds */
-        switch (o->op_type) {
-        default:
-            XSRETURN(0); /* by default, an empty list */
-
-        case OP_MULTIDEREF:
-#ifdef USE_ITHREADS
-#  define PUSH_SV(item) mPUSHu((item)->pad_offset)
-#else
-#  define PUSH_SV(item) PUSHs(make_sv_object(aTHX_ (item)->sv))
-#endif
-            {
-                UNOP_AUX_item *items = cUNOP_AUXo->op_aux;
-                UV actions = items->uv;
-                UV len = items[-1].uv;
-                bool last = 0;
-                bool is_hash = FALSE;
-
-                assert(len <= SSize_t_MAX);
-                EXTEND(SP, (SSize_t)len);
-                mPUSHu(actions);
-
-                while (!last) {
-                    switch (actions & MDEREF_ACTION_MASK) {
-
-                    case MDEREF_reload:
-                        actions = (++items)->uv;
-                        mPUSHu(actions);
-                        continue;
-                        NOT_REACHED; /* NOTREACHED */
-
-                    case MDEREF_HV_padhv_helem:
-                        is_hash = TRUE;
-                        /* FALLTHROUGH */
-                    case MDEREF_AV_padav_aelem:
-                        mPUSHu((++items)->pad_offset);
-                        goto do_elem;
-                        NOT_REACHED; /* NOTREACHED */
-
-                    case MDEREF_HV_gvhv_helem:
-                        is_hash = TRUE;
-                        /* FALLTHROUGH */
-                    case MDEREF_AV_gvav_aelem:
-                        PUSH_SV(++items);
-                        goto do_elem;
-                        NOT_REACHED; /* NOTREACHED */
-
-                    case MDEREF_HV_gvsv_vivify_rv2hv_helem:
-                        is_hash = TRUE;
-                        /* FALLTHROUGH */
-                    case MDEREF_AV_gvsv_vivify_rv2av_aelem:
-                        PUSH_SV(++items);
-                        goto do_vivify_rv2xv_elem;
-                        NOT_REACHED; /* NOTREACHED */
-
-                    case MDEREF_HV_padsv_vivify_rv2hv_helem:
-                        is_hash = TRUE;
-                        /* FALLTHROUGH */
-                    case MDEREF_AV_padsv_vivify_rv2av_aelem:
-                        mPUSHu((++items)->pad_offset);
-                        goto do_vivify_rv2xv_elem;
-                        NOT_REACHED; /* NOTREACHED */
-
-                    case MDEREF_HV_pop_rv2hv_helem:
-                    case MDEREF_HV_vivify_rv2hv_helem:
-                        is_hash = TRUE;
-                        /* FALLTHROUGH */
-                    do_vivify_rv2xv_elem:
-                    case MDEREF_AV_pop_rv2av_aelem:
-                    case MDEREF_AV_vivify_rv2av_aelem:
-                    do_elem:
-                        switch (actions & MDEREF_INDEX_MASK) {
-                        case MDEREF_INDEX_none:
-                            last = 1;
-                            break;
-                        case MDEREF_INDEX_const:
-                            if (is_hash)
-                              PUSH_SV(++items);
-                            else
-                              mPUSHi((++items)->iv);
-                            break;
-                        case MDEREF_INDEX_padsv:
-                            mPUSHu((++items)->pad_offset);
-                            break;
-                        case MDEREF_INDEX_gvsv:
-                            PUSH_SV(++items);
-                            break;
-                        }
-                        if (actions & MDEREF_FLAG_last)
-                            last = 1;
-                        is_hash = FALSE;
-
-                        break;
-                    } /* switch */
-
-                    actions >>= MDEREF_SHIFT;
-                } /* while */
-                XSRETURN(len);
-            } /* OP_MULTIDEREF */
-#if PERL_VERSION > 23 && defined(OP_SIGNATURE)
-        case OP_SIGNATURE:
-            {
-                UNOP_AUX_item *items = cUNOP_AUXo->op_aux;
-                UV len = items[-1].uv;
-                UV actions = items[1].uv;
-
-                assert(len <= SSize_t_MAX);
-                EXTEND(SP, (SSize_t)len);
-                mPUSHu(items[0].uv);
-                mPUSHu(actions);
-                items++;
-
-                while (1) {
-                    switch (actions & SIGNATURE_ACTION_MASK) {
-
-                    case SIGNATURE_reload:
-                        actions = (++items)->uv;
-                        mPUSHu(actions);
-                        continue;
-
-                    case SIGNATURE_end:
-                        goto finish;
-
-                    case SIGNATURE_padintro:
-                        mPUSHu((++items)->uv);
-                        break;
-
-                    case SIGNATURE_arg:
-                    case SIGNATURE_arg_default_none:
-                    case SIGNATURE_arg_default_undef:
-                    case SIGNATURE_arg_default_0:
-                    case SIGNATURE_arg_default_1:
-                    case SIGNATURE_arg_default_op:
-                    case SIGNATURE_array:
-                    case SIGNATURE_hash:
-                        break;
-
-                    case SIGNATURE_arg_default_iv:
-                        mPUSHu((++items)->iv);
-                        break;
-
-                    case SIGNATURE_arg_default_const:
-                        PUSH_SV(++items);
-                        break;
-
-                    case SIGNATURE_arg_default_padsv:
-                        mPUSHu((++items)->pad_offset);
-                        break;
-
-                    case SIGNATURE_arg_default_gvsv:
-                        PUSH_SV(++items);
-                        break;
-
-                    } /* switch */
-
-                    actions >>= SIGNATURE_SHIFT;
-                } /* while */
-              finish:
-                XSRETURN(len);
-            } /* OP_SIGNATURE */
-#endif
-#if PERL_VERSION >= 27
-        case OP_MULTICONCAT:
-            {
-                UNOP_AUX_item *aux = cUNOP_AUXo->op_aux;
-                UNOP_AUX_item *lens;
-                char *p;
-                STRLEN len;
-                SSize_t nargs = aux[PERL_MULTICONCAT_IX_NARGS].ssize;
-
-                /* return (nargs, const string, segment len 0, 1, 2, ...) */
-
-                /* if this changes, this block of code probably needs fixing */
-                assert(PERL_MULTICONCAT_HEADER_SIZE == 5);
-                EXTEND(SP, ((SSize_t)(2 + (nargs+1))));
-                mPUSHi((IV)nargs);
-
-                p   = aux[PERL_MULTICONCAT_IX_PLAIN_PV].pv;
-                len = aux[PERL_MULTICONCAT_IX_PLAIN_LEN].ssize;
-                /* Contrary to B always return both slots, PLAIN and UTF8 */
-                if (p) {
-                  mPUSHp(p, len);
-                } else {
-                  PUSHs(&PL_sv_undef);
-                }
-
-                p   = aux[PERL_MULTICONCAT_IX_UTF8_PV].pv;
-                len = aux[PERL_MULTICONCAT_IX_UTF8_LEN].ssize;
-                if (p) {
-                  PUSHs(newSVpvn_flags(p, len, SVf_UTF8|SVs_TEMP));
-                } else {
-                  PUSHs(&PL_sv_undef);
-                }
-
-                lens = aux + PERL_MULTICONCAT_IX_LENGTHS;
-                nargs++; /* loop (nargs+1) times */
-                while (nargs--) {
-                  mPUSHi(lens->ssize);
-                  lens++;
-                }
-                break;
-            }
-#endif
-        } /* switch */
-	XSRETURN(0); /* force removal of PUTBACK, return */
+SvSTASH(hv)
+    B::HV hv
+  PPCODE:
+    HV* stash = SvSTASH(MUTABLE_SV(hv)); /* [perl #126410] */
+    if ((char*)stash < (char*)PL_sv_arenaroot) {
+      XSRETURN_UNDEF;
+    } else {
+      ST(0) = make_sv_object(aTHX_ MUTABLE_SV(stash));
+      XSRETURN(1);
+    }
 
 #endif
 
@@ -599,6 +305,17 @@ PadnameGEN(padn)
 	B::PADNAME	padn
     CODE:
         RETVAL = padn->xpadn_gen;
+    OUTPUT:
+	RETVAL
+
+MODULE = B	PACKAGE = B::PADLIST	PREFIX = Padlist
+
+U32
+PadlistID(padlist)
+	B::PADLIST	padlist
+    ALIAS: B::PADLIST::OUTID = 1
+    CODE:
+        RETVAL = ix ? padlist->xpadl_outid : padlist->xpadl_id;
     OUTPUT:
 	RETVAL
 
@@ -622,7 +339,7 @@ RX_EXTFLAGS(rx)
 
 MODULE = B	PACKAGE = B::COP	PREFIX = COP_
 
-#ifdef need_COP_stashflags
+#if (PERL_VERSION >= 15) && defined(USE_ITHREADS) && defined(CopSTASH_flags)
 
 #define COP_stashflags(o)	CopSTASH_flags(o)
 
@@ -642,7 +359,6 @@ COP_label(o)
       STRLEN len;
       U32 flags;
       const char *pv = CopLABEL_len_flags(cCOPo, &len, &flags);
-      PERL_UNUSED_VAR(RETVAL);
       ST(0) = pv ? sv_2mortal(newSVpvn_flags(pv, len, flags))
                  : &PL_sv_undef;
     }
@@ -654,8 +370,7 @@ MODULE = B__CC	PACKAGE = B::CC
 
 PROTOTYPES: DISABLE
 
-# Perl_ck_null is not exported on Windows, so disable autovivification
-# optimizations there
+# Perl_ck_null is not exported on Windows, so disable autovivification optimizations there
 
 U32
 _autovivification(cop)
@@ -667,7 +382,7 @@ _autovivification(cop)
 
       RETVAL = 1;
       if (PL_check[OP_PADSV] != PL_check[0]) {
-	/*char *package = CopSTASHPV(cop);*/
+	char *package = CopSTASHPV(cop);
 #ifdef cop_hints_fetch_pvn
 	hint = cop_hints_fetch_pvn(cop, "autovivification", strlen("autovivification"), a_hash, 0);
 #elif PERL_VERSION > 9
@@ -686,8 +401,8 @@ _autovivification(cop)
 	  RETVAL = 0;
       }
     }
-  OUTPUT:
-    RETVAL
+OUTPUT:
+  RETVAL
 
 
 MODULE = B__OP	PACKAGE = B::OP		PREFIX = op_
@@ -698,19 +413,19 @@ I32
 op_slabbed(op)
         B::OP        op
     PPCODE:
-	mPUSHi(op->op_slabbed);
+	PUSHi(op->op_slabbed);
 
 I32
 op_savefree(op)
         B::OP        op
     PPCODE:
-	mPUSHi(op->op_savefree);
+	PUSHi(op->op_savefree);
 
 I32
 op_static(op)
         B::OP        op
     PPCODE:
-	mPUSHi(op->op_static);
+	PUSHi(op->op_static);
 
 #endif
 
@@ -720,13 +435,13 @@ I32
 op_folded(op)
         B::OP        op
     PPCODE:
-	mPUSHi(op->op_folded);
+	PUSHi(op->op_folded);
 
 #endif
 
 MODULE = B	PACKAGE = B::HV		PREFIX = Hv
 
-#ifdef need_HvARRAY_utf8
+#if PERL_VERSION >= 10
 
 void
 HvARRAY_utf8(hv)
@@ -742,11 +457,49 @@ HvARRAY_utf8(hv)
                 } else if (HeKUTF8(he)) {
                     PUSHs(newSVpvn_flags(HeKEY(he), HeKLEN(he), SVf_UTF8|SVs_TEMP));
                 } else {
-                    mPUSHp(HeKEY(he), HeKLEN(he));
+                    PUSHs(newSVpvn_flags(HeKEY(he), HeKLEN(he), SVs_TEMP));
                 }
 		PUSHs(make_sv_object(aTHX_ HeVAL(he)));
 	    }
 	}
+
+#endif
+
+MODULE = B__C	PACKAGE = B::C
+
+PROTOTYPES: DISABLE
+
+#if PERL_VERSION >= 11
+
+CV*
+method_cv(meth, packname)
+        SV* meth;
+	char *packname;
+   CODE:
+	U32 hash;
+    	HV* stash; /* XXX from op before, also on the run-time stack */
+        GV* gv;
+	hash = SvSHARED_HASH(meth);
+        stash = gv_stashpv(packname, TRUE);
+	if (hash) {
+          const HE* const he = hv_fetch_ent(stash, meth, 0, hash);
+          if (he) {
+	    gv = MUTABLE_GV(HeVAL(he));
+	    if (isGV(gv) && GvCV(gv) &&
+		(!GvCVGEN(gv) || GvCVGEN(gv)
+                 == (PL_sub_generation + HvMROMETA(stash)->cache_gen)))
+              RETVAL = (CV*)MUTABLE_SV(GvCV(gv));
+              return;
+          }
+        }
+        /* public API since 5.11 */
+	gv = gv_fetchmethod_flags(stash,
+			      SvPV_nolen_const(meth),
+			      GV_AUTOLOAD | GV_CROAK);
+    	assert(gv);
+    	RETVAL = isGV(gv) ? (CV*)MUTABLE_SV(GvCV(gv)) : (CV*)MUTABLE_SV(gv);
+    OUTPUT:
+        RETVAL
 
 #endif
 
@@ -757,8 +510,7 @@ MODULE = B__C		PACKAGE = B::C
 SV*
 get_linear_isa(classname)
     SV* classname;
-  CODE:
-  {
+CODE:
     HV *class_stash = gv_stashsv(classname, 0);
 
     if (!class_stash) {
@@ -770,8 +522,7 @@ get_linear_isa(classname)
     else { /* just dfs */
       RETVAL = newRV(MUTABLE_SV(Perl_mro_get_linear_isa(aTHX_ class_stash)));
     }
-  }
-  OUTPUT:
+OUTPUT:
     RETVAL
 
 #endif
