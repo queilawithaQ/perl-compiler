@@ -1,16 +1,8 @@
-use strict;
 use ExtUtils::MakeMaker;
 use Config;
 use File::Spec;
 use 5.006;
 use Carp;
-
-
-if ($Config{d_cplusplus}) {
-    # ByteLoader/Bytecode can but don't bother
-    print "error B-C cannot yet be compiled with C++\n";
-    exit(1);
-}
 
 my $CORE = $ENV{PERL_CORE} || grep { $_ eq 'PERL_CORE=1' } @ARGV;
 mkdir "lib/B/C" unless -d "lib/B/C";
@@ -65,7 +57,7 @@ sub b_c_deps {
     my $blib = "-I".File::Spec->catfile(qw(.. .. lib auto))
       ." -I".File::Spec->catfile(qw(.. .. lib));
     my $runperl = $X . ($CORE ? ' '.$blib : "");
-    return "AnyDBM_File AutoLoader B B::AV B::Asmdata B::BINOP B::BM B::C B::C::Config B::C::InitSection B::C::Section B::CC B::COP B::CV B::FAKEOP B::FM B::GV B::HE B::HV B::INVLIST B::IO B::IV B::LEXWARN B::LISTOP B::LOGOP B::LOOP B::MAGIC B::METHOP B::NULL B::NV B::OBJECT B::OP B::PADLIST B::PADNAME B::PADNAMELIST B::PADOP B::PMOP B::PV B::PVIV B::PVLV B::PVMG B::PVNV B::PVOP B::REGEXP B::RHE B::RV B::SPECIAL B::STASHGV B::SV B::SVOP B::Section B::UNOP B::UNOP_AUX B::UV CORE CORE::GLOBAL Carp Config DB DynaLoader EV Encode Errno Exporter Exporter::Heavy ExtUtils ExtUtils::Constant ExtUtils::Constant::ProxySubs Fcntl FileHandle IO IO::File IO::Handle IO::Poll IO::Seekable IO::Socket IO::Socket::SSL Int Internals Net Net::DNS Num O POSIX PerlIO PerlIO::Layer PerlIO::scalar Regexp SelectSaver Str Symbol UInt UNIVERSAL XSConfig XSLoader __ANON__ arybase arybase::mg attributes constant coretypes int main mro num re str strict threads uint utf8 vars version warnings warnings::register" if $CORE and $] > 5.020;
+    return "AnyDBM_File AutoLoader B B::AV B::Asmdata B::BINOP B::BM B::C B::C::Config B::C::InitSection B::C::Section B::CC B::COP B::CV B::FAKEOP B::FM B::GV B::HE B::HV B::INVLIST B::IO B::IV B::LEXWARN B::LISTOP B::LOGOP B::LOOP B::MAGIC B::METHOP B::NULL B::NV B::OBJECT B::OP B::PADLIST B::PADNAME B::PADNAMELIST B::PADOP B::PMOP B::PV B::PVIV B::PVLV B::PVMG B::PVNV B::PVOP B::REGEXP B::RHE B::RV B::SPECIAL B::STASHGV B::SV B::SVOP B::Section B::UNOP B::UNOP_AUX B::UV CORE CORE::GLOBAL Carp Config DB DynaLoader EV Encode Errno Exporter Exporter::Heavy ExtUtils ExtUtils::Constant ExtUtils::Constant::ProxySubs Fcntl FileHandle IO IO::File IO::Handle IO::Poll IO::Seekable IO::Socket IO::Socket::SSL Int Internals Net Net::DNS Num O POSIX PerlIO PerlIO::Layer PerlIO::scalar Regexp SelectSaver Str Symbol UInt UNIVERSAL XSConfig XSLoader __ANON__ arybase arybase::mg attributes constant coretypes int main mro num re str strict threads uint utf8 vars version warnings warnings::register Socket" if $CORE and $] > 5.020;
     return `$runperl -Ilib -mB::C -mO -MB -e"B::C::collect_deps()"`;
 }
 
@@ -97,7 +89,7 @@ sub write_b_c_config {
     print PH "# broken or patched upstream 5.22 ByteLoader. undef for yet undecided\n";
     $have_byteloader = 0 if $Config{usecperl}; # have it, but still broken
     print PH "\$have_byteloader = $have_byteloader;\n";
-    print PH "# since cperl 5.22.2:\n";
+    print PH "# cperl 5.22.2:\n";
     print PH "\$have_op_rettype = $have_op_rettype;\n";
     print PH "\$have_HEK_STATIC = $have_HEK_STATIC;\n";
     print PH "# use extra compiler flags, after ccopts, resp. ldopts\n";
@@ -113,15 +105,11 @@ sub write_b_c_config {
     my %cfg;
     my $conf = "(\n";
     # Ensure to add all used Config keys in B::C here, otherwise they will be silently empty.
-    # easier hash key/value slices only came with 5.22.
-    # Some keys are only needed with cross
-    for my $s (qw(archname archlib sitearch sitelib byteorder cc ccflags
+    # easier hash key/value slices only came with 5.22
+    for my $s (qw(archname cc ccflags
                   d_c99_variadic_macros d_dlopen d_isinf d_isnan d_longdbl dlext
-                  i_dlfcn ivdformat ivsize ld ldflags libs longsize mad nvgformat
-                  osname osvers perlpath privlib ptrsize sizesize static_ext
-                  usecperl usedl useithreads uselongdouble usemultiplicity
-	          usemymalloc uvuformat version))
-      # maybe: use64bitall use64bitint
+                  i_dlfcn ivdformat ivsize longsize mad nvgformat ptrsize static_ext
+                  usecperl usedl useithreads uselongdouble usemultiplicity usemymalloc uvuformat))
     {
         if ($CORE) {
             my $v = $Config::Config{$s};
@@ -154,9 +142,9 @@ sub write_b_c_config {
 
 # XXX Check for 5.16.0 B-1.34 and offer to patch it? rather use `perlall build --patches=Compiler`
 my $unicode_warning =
-  "  Perl handling of new unicode identifiers - package and symbol names - \n".
-  "  without proper TR39 handling is considered a security risc and is not fully supported.\n".
-  "  See http://websec.github.io/unicode-security-guide/\n\n";
+         "  Perl handling of new unicode identifiers - package and symbol names - \n".
+	 "  without proper TR39 handling is considered a security risc and is not fully supported.\n".
+	 "  See http://websec.github.io/unicode-security-guide/\n\n";
 if ($ENV{PERL_CORE}) {
     # supress the TR39 warnings in core
 }
@@ -165,36 +153,21 @@ elsif ($] > 5.015005 and $] < 5.019004) {
     warn "Warning: Bad perl version $]\n".
 	 $unicode_warning.
 	 "  Check your code for syntax spoofs, confusables, esp. strip \\0 from package names.\n";
-} elsif ($] >= 5.019004 and !($Config{usecperl} and $] >= 5.025002)) {
+} elsif ($] >= 5.019004) {
     warn "Warning:\n".
 	 $unicode_warning.
 	 "  Check your code for syntax spoofs, confusables, strip \\0 from package names.\n".
          ($Config{usecperl} ? "" :
 	 "  Enable use warnings 'syscalls'.\n");
 }
-my $carp_warning =
-  "  Perl5 broke Carp for the compiler with 5.26 with a dynamic _fetch_sub()\n".
-  "  Either use an earlier Carp (<1.42) or check the cperl patches, replacing it\n".
-  "  with a simple version check.\n";
-if ($] >= 5.025004 and !$Config{usecperl}) {
-    warn "Warning: Unsupported perl version $]\n".
-	 $carp_warning;
-}
 
 my $perlcc = File::Spec->catfile("script", "perlcc");
-my $buildcc = File::Spec->catfile("script", "buildcc");
-if ($CORE and $^O eq 'MSWin32') {
-    my $perldll = $Config{usecperl} ? "cperl*.dll" : "perl*.dll";
-    system("copy ..\..\$perldll *.*");
-}
 
 WriteMakefile(
     NAME	 => "B::C",
     VERSION_FROM => "lib/B/C.pm",
-    PL_FILES   => { $perlcc.'.PL'       => $perlcc,
-	            $buildcc.'.PL'      => $buildcc },
-    EXE_FILES  => [$perlcc, qw(script/buildcc script/cc_harness
-	                       script/assemble script/disassemble)],
+    PL_FILES   => { $perlcc.'.PL'    => $perlcc },
+    EXE_FILES  => [$perlcc, qw(script/cc_harness script/assemble script/disassemble)],
     PREREQ_PM  => {'Opcodes'  => '0',    # optional
 		   'IPC::Run' => '0',    # optional
 		   'B::Flags' => '0.15', # optional
@@ -202,8 +175,8 @@ WriteMakefile(
 		   'ExtUtils::Embed' => '1.25' # mandatory (missing on redhat)
                    #'B'        => '1.0901' # required but in CORE
                   },
-    'AUTHOR'   => 'Reini Urban <rurban@cpan.org>, '
-                . 'Malcolm Beattie (retired)',
+    'AUTHOR'   => 'Malcolm Beattie (retired), '
+	      .   'Reini Urban <perl-compiler@googlegroups.com>',
     'ABSTRACT' => 'Perl compiler',
     'LICENSE'  => 'perl',
     # was in core until 5.9.5, need to update it there
@@ -227,8 +200,10 @@ WriteMakefile(
                        resources =>
                        {
                         license     => 'http://dev.perl.org/licenses/',
-                        bugtracker  => 'https://github.com/rurban/perl-compiler/issues',
-                        repository  => 'https://github.com/rurban/perl-compiler',
+                        homepage    => 'http://www.perl-compiler.org',
+                        bugtracker  => 'http://code.google.com/p/perl-compiler/issues',
+                        repository  => 'http://perl-compiler.googlecode.com/',
+                        MailingList => 'http://groups.google.com/group/perl-compiler',
                        },
                       }
     ) : ()),
@@ -238,10 +213,9 @@ WriteMakefile(
                "lib/B/Asmdata.pm script/perlcc ccode* cccode* Ccode* lib/B/C/Config.pm ".
  	       "*.core *.stackdump a.out a.exe *.cee *.c *.asm *.dbg *.plc *.obj ".
                "*.concise *~ dll.base dll.exp mod.pl pcc* *.bak *.a ".
-               "t/CORE/v5.*/*/*.bin t/CORE/v5.*/*/*.c Io_argv* t/CORE/v5.*/*/*.subtest.*.t ".
-               "t/CORE/v5.*/xtestc* t/CORE/v5.*/C-COMPILED/xtestc/*.t ".
-               "t/CORE/v5.*/tmp* tmp* ".
-               "perl*.dll cperl*.dll "
+               "t/CORE/v5.*/*/*.bin t/CORE/v5.*/*/*.c Io_argv* t/CORE/v5.*/*/*.subtest.*.t".
+               "t/CORE/v5.*/xtestc* t/CORE/v5.*/C-COMPILED/xtestc/*.t".
+               "t/CORE/v5.*/tmp* tmp*"
              },
 );
 
@@ -280,18 +254,17 @@ sub try_compile {
     }
     print PROG $testc;
     close PROG;
-    my @candidate = ();
-    my $devnull = $^O eq 'MSWin32' ? "> NUL" : ">/dev/null 2>&1";
+    @candidate = ();
+    $devnull = $^O eq 'MSWin32' ? "> NUL" : ">/dev/null 2>&1";
     my $cmd = "$Config{cc} $Config{ccflags} test.c";
-    push @candidate, "$cmd -o test$Config{exe_ext} $libs $devnull";
-    push @candidate, "$cmd -otest$Config{exe_ext} $libs $devnull";
-    my $rc=0;
+    push @candidate, "$cmd -o test$Config{EXE_EXT} $libs $devnull";
+    push @candidate, "$cmd -otest$Config{EXE_EXT} $libs $devnull";
     while (my $cmd1 = shift (@candidate)) {
 	system ($cmd1);
-	if ($? == 0) {$rc=1;last}
+	unlink "test.c", "test$Config{EXE_EXT}";
+	$? == 0 && return 1;
     }
-    unlink "test.c", "test$Config{exe_ext}";
-    return $rc;
+    return 0;
 }
 
 sub check_op_rettype {
@@ -406,20 +379,6 @@ sub install_independent_comalloc {
     chdir "..";
 }
 
-# cannot use t/modules.pm
-sub perlversion {
-  my $DEBUGGING = ($Config{ccflags} =~ m/-DDEBUGGING/);
-  my $dVAR = ($Config{ccflags} =~ m/-DPERL_GLOBAL_STRUCT/);
-  return sprintf("%1.6f%s%s%s%s", $],
-                 ($Config{usecperl} ? "c" : ""),
-                 ($DEBUGGING ? 'd' : ''),
-                 ($Config{useithreads} ? ''
-                  : $Config{usemultiplicity} ? '-m'
-                  : '-nt'),
-                 ($dVAR ? '-dVAR' : '')
-                 );
-}
-
 package MY;
 
 # Ignore certain files
@@ -462,7 +421,7 @@ sub ccflags {
     # Recommended by http://www.network-theory.co.uk/docs/gccintro/gccintro_32.html
     # -ansi -pedantic -Wall -W -Wconversion -Wshadow -Wcast-qual -Wwrite-strings (-W => -WExtra)
     $ccflags .= " -ansi -pedantic -Wall -Wextra -Wconversion -Wshadow -Wcast-qual -Wwrite-strings"
-      if $Config::Config{cc} =~ /\bgcc/ and $Config::Config{gccversion};
+      if $Config{cc} =~ /gcc/;
 }
 
 sub depend {
@@ -487,7 +446,7 @@ TAGS : $asmdata
     if ($] > 5.009 and defined($ExtUtils::MM_Unix::VERSION)) {
         my $ver = 0+$ExtUtils::MM_Unix::VERSION;
         # 8.0403 is the cperl 5.24.0 version based on 7.04_03
-        if ($ver == 8.0403 or $ver == 8.0404
+        if (($Config{usecperl} and $ver >= 8.0403)
             or $ver < 7.0509 or $ver == 7.1)
         {
             $result .= "\ntest :: subdirs-test\n\n";
@@ -495,7 +454,7 @@ TAGS : $asmdata
             $result .= "\ntest :: subdirs-test_\$(LINKTYPE)\n\n";
         }
     }
-    if ($Config::Config{make} eq 'mingw32-make') { # mingw32 make different to msys make
+    if ($Config{make} eq 'mingw32-make') { # mingw32 make different to msys make
         $result .= "\n.PHONY : \$(CONFIGDEP)\n\n";
     }
     $result;
@@ -510,7 +469,7 @@ sub subdirs {
         return $s . "
 
 subdirs ::
-	\$(PERL) \"-I\$(PERL_ARCHLIB)\" $bytehintspatched
+	\$(PERL) $bytehintspatched
 ";
     } else {
         $s
@@ -518,12 +477,9 @@ subdirs ::
 }
 
 sub test {
-    my $known_errors = "known_errors" . ($^V =~ /c$/ ? "_cperl.txt" : ".txt");
-    my $logsuffix = main::perlversion();
     shift->SUPER::test(@_) .
 "
-# PERL_VAR: major only
-PERL_VER = v5.".substr("$]",3,2) .
+PERL_VER = v5.".substr($],3,2) .
       q(
 testmod :: pure_all
 	PERL_DL_NONLAZY=1 $(FULLPERLRUN) -Iblib/arch -Iblib/lib t/modules.t
@@ -539,7 +495,7 @@ testbc :: pure_all
 testfast :: pure_all
 	NO_AUTHOR=1 $(FULLPERLRUN) -S prove -b -j10 -f
 testfast-log :: pure_all
-	NO_AUTHOR=1 $(FULLPERLRUN) -S prove -b -j10 -f  | tee log.test-).$logsuffix.q(-`git describe --tags`
+	NO_AUTHOR=1 $(FULLPERLRUN) -S prove -b -j10 -f  | tee log.test-).$].q(-`git describe --tags`
 testcritical :: pure_all
 	t/critical.sh
 teststatus :: pure_all
@@ -552,9 +508,9 @@ testcore :: pure_all testcore_init
 	$(FULLPERLRUN) -S prove -b -j10 -f t/CORE/$(PERL_VER)/C-COMPILED/*/
 testcore-log :: pure_all testcore_init
 	$(FULLPERLRUN) -S prove -b -j10 -f t/CORE/$(PERL_VER)/C-COMPILED/*/ | \
-	  tee log.test-core-).$logsuffix.q(-`git describe --tags`
+	  tee log.test-core-$(PERL_VER)-`git describe --tags`
 testcore-fail :: pure_all testcore_init
-	$(FULLPERLRUN) -ane'print "t/CORE/$(PERL_VER)/C-COMPILED/$$F[0]\n" unless /^#/' t/CORE/$(PERL_VER)/C-COMPILED/).$known_errors.q( | xargs $(FULLPERLRUN) -S prove -b -j10 -f
+	$(FULLPERLRUN) -ane'print "t/CORE/$(PERL_VER)/C-COMPILED/$$F[0]\n" unless /^#/' t/CORE/$(PERL_VER)/C-COMPILED/known_errors.txt | xargs $(FULLPERLRUN) -S prove -b -j10 -f
 )
 }
 
@@ -562,7 +518,7 @@ sub install {
     my $result = shift->SUPER::install(@_);
     my $headerpath = main::headerpath();
     my $cc_runtime_h = File::Spec->catfile($headerpath, 'cc_runtime.h');
-    if ($] > 5.013007 and !-e $cc_runtime_h) {
+    if ($] > 5.013007 and !-e $cc_runtime.h) {
         $result =~ s/install :: pure_install doc_install/install :: pure_install doc_install ccinc_install/;
 	$result .= '
 ccinc_install :: $(PERL_INC)/cc_runtime.h
