@@ -26,43 +26,10 @@
 # How to installed skip modules:
 # grep ^skip log.modules-bla|perl -lane'print $F[1]'| xargs perlbla -S cpan
 # or t/testm.sh -s
-BEGIN {
-  if ($ENV{PERL_CORE}) {
-    unshift @INC, ('t', '../../lib');
-  } else {
-    unshift @INC, 't';
-  }
-  require TestBC;
-}
+
 use strict;
 use Test::More;
 use File::Temp;
-use Config;
-require Carp;
-
-my $ccopts;
-BEGIN {
-  plan skip_all => "Overlong tests, timeout on Appveyor CI"
-    if $^O eq 'MSWin32' and $ENV{APPVEYOR};
-  plan skip_all => "Overlong tests, timeout on CI"
-    if is_CI() and $ENV{PERL_CORE};
-  plan skip_all => "SKIP_SLOW_TESTS, timeout on CI"
-    if $ENV{SKIP_SLOW_TESTS};
-  plan skip_all => "Unsupported Carp version $Carp::VERSION >= 1.42"
-    if $] >= 5.025004 and !$Config{usecperl} and $Carp::VERSION ge '1.42' and is_CI();
-
-  if ($^O eq 'MSWin32' and $Config{cc} eq 'cl') {
-    # MSVC takes an hour to compile each binary unless -Od
-    $ccopts = '"--Wc=-Od"';
-  } elsif ($^O eq 'MSWin32' and $Config{cc} eq 'gcc') {
-    # mingw is much better but still insane with <= 4GB RAM
-    $ccopts = '"--Wc=-O0"';
-  } elsif ($Config{ccflags} =~ /-flto/) { # too big
-    $ccopts = '"--Wc=-O1"';
-  } else {
-    $ccopts = '';
-  }
-}
 
 # Try some simple XS module which exists in 5.6.2 and blead
 # otherwise we'll get a bogus 40% failure rate
@@ -75,12 +42,11 @@ BEGIN {
   my $X = $^X =~ m/\s/ ? qq{"$^X"} : $^X;
   my $tmp = File::Temp->new(TEMPLATE => 'pccXXXXX');
   my $out = $tmp->filename;
-  my $Mblib = Mblib();
-  my $perlcc = perlcc();
-  my $result = `$X $Mblib $perlcc -O3 $ccopts --staticxs -o$out -e"use Data::Dumper;"`;
+  my $Mblib = $^O eq 'MSWin32' ? '-Iblib\arch -Iblib\lib' : "-Iblib/arch -Iblib/lib";
+  my $result = `$X $Mblib blib/script/perlcc -O3 --staticxs -o$out -e"use Data::Dumper;"`;
   my $exe = $^O eq 'MSWin32' ? "$out.exe" : $out;
   unless (-e $exe or -e 'a.out') {
-    my $cmd = qq($X $Mblib $perlcc -O3 $ccopts -o$out -e"use Data::Dumper;");
+    my $cmd = qq($X $Mblib blib/script/perlcc -O3 -o$out -e"use Data::Dumper;");
     warn $cmd."\n" if $ENV{TEST_VERBOSE};
     my $result = `$cmd`;
     unless (-e $out or -e 'a.out') {
@@ -100,6 +66,7 @@ BEGIN {
 our %modules;
 our $log = 0;
 use modules;
+require "test.pl";
 
 my $opts_to_test = 1;
 my $do_test;
@@ -112,19 +79,14 @@ my $test_count = scalar @modules * $opts_to_test * ($do_test ? 5 : 4);
 # $test_count -= 4 * $opts_to_test * (scalar @modules - scalar(keys %modules));
 plan tests => $test_count;
 
+use Config;
 use B::C;
 use POSIX qw(strftime);
 
-if ($] >= 5.025004 and !$Config{usecperl} and $Carp::VERSION ge '1.42') {
-  warn "# Unsupported Carp version $Carp::VERSION >= 1.42\n";
-}
-
-
 eval { require IPC::Run; };
 my $have_IPC_Run = defined $IPC::Run::VERSION;
-log_diag("Warning: IPC::Run is not available. Error trapping will be ".
-         "limited, no timeouts.")
-  if !$have_IPC_Run and !$ENV{PERL_CORE};
+log_diag("Warning: IPC::Run is not available. Error trapping will be limited, no timeouts.")
+  unless $have_IPC_Run;
 
 my @opts = ("-O3");				  # only B::C
 @opts = ("-O3", "-O", "-B") if grep /-all/, @ARGV;  # all 3 compilers
@@ -153,14 +115,14 @@ unless (is_subset) {
     $svnrev = `svn info|grep Revision:`;
     chomp $svnrev;
     $svnrev =~ s/Revision:\s+/r/;
-    my $svnstat = `svn status lib/B/C.pm t/TestBC.pm t/*.t`;
+    my $svnstat = `svn status lib/B/C.pm t/test.pl t/*.t`;
     chomp $svnstat;
     $svnrev .= " M" if $svnstat;
   } elsif (-d '.git') {
     local $ENV{LC_MESSAGES} = "C";
     $svnrev = `git log -1 --pretty=format:"%h %ad | %s" --date=short`;
     chomp $svnrev;
-    my $gitdiff = `git diff lib/B/C.pm t/TestBC.pm t/*.t`;
+    my $gitdiff = `git diff lib/B/C.pm t/test.pl t/*.t`;
     chomp $gitdiff;
     $svnrev .= " M" if $gitdiff;
   }
@@ -177,8 +139,7 @@ unless (is_subset) {
 
 my $module_count = 0;
 my ($skip, $pass, $fail, $todo) = (0,0,0,0);
-my $Mblib = Mblib();
-my $perlcc = perlcc();
+my $Mblib = $^O eq 'MSWin32' ? '-Iblib\arch -Iblib\lib' : "-Iblib/arch -Iblib/lib";
 
 MODULE:
 for my $module (@modules) {
@@ -201,7 +162,7 @@ for my $module (@modules) {
       $skip++;
       log_pass("skip", "$module", 0);
 
-      skip("$module not installed", int(4 * scalar @opts));
+      skip("$module not installed", 4 * scalar @opts);
       next MODULE;
     }
     if (is_skip($module)) { # !$have_IPC_Run is not really helpful here
@@ -209,7 +170,7 @@ for my $module (@modules) {
       $skip++;
       log_pass("skip", "$module #$why", 0);
 
-      skip("$module $why", int(4 * scalar @opts));
+      skip("$module $why", 4 * scalar @opts);
       next MODULE;
     }
     $module = 'if(1) => "Sys::Hostname"' if $module eq 'if';
@@ -232,18 +193,11 @@ for my $module (@modules) {
         $opt .= " -S" if $keep and $opt !~ / -S\b/;
         # TODO ./a often hangs but perlcc not
         my @cmd = grep {!/^$/}
-	  $runperl,split(/ /,$Mblib),split(/ /,$perlcc),split(/ /,$opt),$ccopts,$staticxs,"-o$out","-r",$out_pl;
+	  $runperl,split(/ /,$Mblib),"blib/script/perlcc",split(/ /,$opt),$staticxs,"-o$out","-r",$out_pl;
         my $cmd = join(" ", @cmd);
         #warn $cmd."\n" if $ENV{TEST_VERBOSE};
 	# Esp. darwin-2level has insane link times
-        my $timeout = 60; # in secs.
-        if ($Config{ccflags} =~ /-flto/ or
-           ($^O eq 'MSWin32' and $Config{cc} eq 'cl')) {
-          $timeout = 720;
-        }
-        # to bypass CI timeouts (no output has been received in the last 10m0s)
-        warn "# $module\n" if is_CI();
-        ($result, $stdout, $err) = run_cmd(\@cmd, $timeout);
+        ($result, $stdout, $err) = run_cmd(\@cmd, 720); # in secs.
         ok(-s $out,
            "$module_count: use $module  generates non-zero binary")
           or $module_passed = 0;
@@ -261,8 +215,7 @@ for my $module (@modules) {
           @cmd = ($runperl,split(/ /,$Mblib),"-MO=C,$c_opt,-o$out_c",$out_pl);
           #warn join(" ",@cmd."\n") if $ENV{TEST_VERBOSE};
           ($r, $stdout, $err1) = run_cmd(\@cmd, 60); # in secs
-          my $cc_harness = cc_harness();
-          @cmd = ($runperl,split(/ /,$Mblib." ".$cc_harness),,"-o$out",$out_c);
+          @cmd = ($runperl,split(/ /,$Mblib),"script/cc_harness","-o$out",$out_c);
           #warn join(" ",@cmd."\n") if $ENV{TEST_VERBOSE};
           ($r, $stdout, $err1) = run_cmd(\@cmd, 360); # in secs
           @cmd = ($^O eq 'MSWin32' ? "$out" : "./$out");
@@ -301,24 +254,18 @@ for my $module (@modules) {
     }}
 }
 
-if (!$ENV{PERL_CORE}) {
-  my $count = scalar @modules - $skip;
-  log_diag("$count / $module_count modules tested with B-C-${B::C::VERSION} - "
-           .$Config{usecperl}?"c":""."perl-$perlversion");
-  log_diag(sprintf("pass %3d / %3d (%s)", $pass, $count, percent($pass,$count)));
-  log_diag(sprintf("fail %3d / %3d (%s)", $fail, $count, percent($fail,$count)));
-  log_diag(sprintf("todo %3d / %3d (%s)", $todo, $fail, percent($todo,$fail)));
-  log_diag(sprintf("skip %3d / %3d (%s not installed)\n",
-                   $skip, $module_count, percent($skip,$module_count)));
-}
+my $count = scalar @modules - $skip;
+log_diag("$count / $module_count modules tested with B-C-${B::C::VERSION} - perl-$perlversion");
+log_diag(sprintf("pass %3d / %3d (%s)", $pass, $count, percent($pass,$count)));
+log_diag(sprintf("fail %3d / %3d (%s)", $fail, $count, percent($fail,$count)));
+log_diag(sprintf("todo %3d / %3d (%s)", $todo, $fail, percent($todo,$fail)));
+log_diag(sprintf("skip %3d / %3d (%s not installed)\n",
+                 $skip, $module_count, percent($skip,$module_count)));
 
 exit;
 
 # t/todomod.pl
 # for t in $(cat t/top100); do perl -ne"\$ARGV=~s/log.modules-//;print \$ARGV,': ',\$_ if / $t\s/" t/modules.t `ls log.modules-5.0*|grep -v .err`; read; done
-
-# Moose was compilable with pre-ETHER releases, but then they forgot how phases
-# should work in modules.
 sub is_todo {
   my $module = shift or die;
   my $DEBUGGING = ($Config{ccflags} =~ m/-DDEBUGGING/);
@@ -345,9 +292,6 @@ sub is_todo {
   if ($] >= 5.008004 and $] < 5.0080006) { foreach(qw(
     Module::Pluggable
   )) { return '5.8.5 CopFILE_set' if $_ eq $module; }}
-  if ($] <= 5.0080009) { foreach(qw(
-    IO::Socket
-  )) { return '5.8.9 empty Socket::AF_UNIX' if $_ eq $module; }}
   # PMOP quoting fixed with 1.45_14
   #if ($] < 5.010) { foreach(qw(
   #  DateTime
@@ -362,67 +306,21 @@ sub is_todo {
   #if ($] > 5.015 and $] < 5.015006) { foreach(qw(
   # B::Hooks::EndOfScope
   #)) { return '> 5.15' if $_ eq $module; }}
-  #if ($] >= 5.018) { foreach(qw(
-  #    ExtUtils::ParseXS
-  #)) { return '>= 5.18 #137 Eval-group not allowed at runtime' if $_ eq $module; }}
+  if ($] >= 5.018) { foreach(qw(
+      ExtUtils::ParseXS
+  )) { return '>= 5.18 #137 Eval-group not allowed at runtime' if $_ eq $module; }}
   # DateTime fixed with 1.52_13
   # stringify fixed with 1.52_18
-  if ($] >= 5.018) { foreach(qw(
-      Path::Class
-  )) { return '>= 5.18 #219 overload stringify regression' if $_ eq $module; }}
-  # invalid free
-  if ($] >= 5.022 and $] < 5.026 and !$Config{usecperl}) { foreach(qw(
-      Test::Simple
-      Test::Deep
-      Test::Tester
-      Test::NoWarnings
-      Test::Pod
-  )) { return '5.22-5.26 !cperl invalid free' if $_ eq $module; }}
-  if ($] >= 5.022 and $] < 5.028 and !$Config{usecperl}) { foreach(qw(
-      Test::Simple
-      Test::Exception
-      Test::Deep
-      Test::Tester
-      Test::NoWarnings
-      Test::Pod
-  )) { return '5.22-5.28 !cperl invalid free' if $_ eq $module; }}
-  # old C-1.52_15
-  #if ($] >= 5.022 and $] < 5.024 and $Config{usecperl}) { foreach(qw(
-  #    Class::Inspector
-  #    Data::OptList
-  #    File::Spec
-  #    File::Temp
-  #    ExtUtils::CBuilder
-  #    Params::Util
-  #    Tree::DAG_Node
-  #)) { return '5.22 cperl' if $_ eq $module; }}
-  # 1.53_08, 1.52_15
-  if ($] >= 5.022 and $] < 5.024) { foreach(qw(
-      ExtUtils::CBuilder
-  )) { return '5.22' if $_ eq $module; }}
-  # fixed with 1.56
-  #if ($] >= 5.023005) { foreach(qw(
-  #    Attribute::Handlers
-  #    MooseX::Types
-  #)) { return '>= 5.23.5 SEGV' if $_ eq $module; }}
-  # Carp-like recursion on dynaload error
-  if ($] >= 5.024 and $] < 5.026 and !$Config{usecperl}) { foreach(qw(
-      List::MoreUtils
-      DateTime::Locale
-  )) { return '5.24 !cperl' if $_ eq $module; }}
-  if ($] >= 5.024 and $Config{usecperl}) { foreach(qw(
-      DateTime
-      DateTime::Locale
-      DateTime::TimeZone
-      Moose
-      Path::Class
-  )) { return '>= 5.24 cperl (stringify overload #219?)' if $_ eq $module; }}
+  #if ($] >= 5.018) { foreach(qw(
+  #    Path::Class
+  #)) { return '>= 5.18 #219 overload stringify regression' if $_ eq $module; }}
+  if ($] >= 5.023005) { foreach(qw(
+      Attribute::Handlers
+      MooseX::Types
+  )) { return '>= 5.23.5 SEGV' if $_ eq $module; }}
 
   # ---------------------------------------
   if ($Config{useithreads}) {
-    if ($^O eq 'MSWin32') { foreach(qw(
-      Test::Harness
-    )) { return 'MSWin32 with threads' if $_ eq $module; }}
     if ($] >= 5.008008 and $] < 5.008009) { foreach(qw(
       Test::Tester
     )) { return '5.8.8 with threads' if $_ eq $module; }}
@@ -439,21 +337,14 @@ sub is_todo {
     #)) { return '>= 5.22 with threads SEGV' if $_ eq $module; }}
     #if ($] >= 5.022) { foreach(qw(
     #)) { return '>= 5.22 with threads, no ok' if $_ eq $module; }}
-    # but works with msvc
-    if ($^O eq 'MSWin32' and $Config{cc} eq 'gcc') { foreach(qw(
-      Pod::Usage
-    )) { return 'mingw' if $_ eq $module; }}
   } else { #no threads --------------------------------
     #if ($] > 5.008008 and $] <= 5.009) { foreach(qw(
     #  ExtUtils::CBuilder
     #)) { return '5.8.9 without threads' if $_ eq $module; }}
-    # invalid free, fixed with 1.56
-    #if ($] >= 5.016 and $] < 5.018) { foreach(qw(
-    #    Module::Build
-    #)) { return '5.16 without threads (invalid free)' if $_ eq $module; }}
-    if ($] >= 5.022 and $] < 5.026) { foreach(qw(
-        Test::Pod
-    )) { return '5.22 invalid free' if $_ eq $module; }}
+    # invalid free
+    if ($] >= 5.016 and $] < 5.018) { foreach(qw(
+        Module::Build
+    )) { return '5.16 without threads (invalid free)' if $_ eq $module; }}
     # This is a flapping test
     if ($] >= 5.017 and $] < 5.020) { foreach(qw(
         Moose
@@ -480,74 +371,4 @@ sub is_skip {
       }
     }
   }
-  #if ($ENV{PERL_CORE} and $] > 5.023
-  #    and ($Config{cc} =~ / -m32/ or $Config{ccflags} =~ / -m32/)) {
-  #  return 'hangs in CORE with -m32' if $module =~ /^Pod::/;
-  #}
-  # recursion stack SEGV on die (Carp <= DynaLoader)
-  if ($] >= 5.026 and !$Config{usecperl} and $Carp::VERSION ge '1.42') { foreach(qw(
-      Attribute::Handlers
-      B::Hooks::EndOfScope
-      Class::Accessor
-      Class::C3
-      Class::Inspector
-      Class::MOP
-      Clone
-      Compress::Raw::Bzip2
-      Compress::Raw::Zlib
-      DBI
-      Data::Dumper
-      Data::OptList
-      DateTime
-      DateTime::Locale
-      DateTime::TimeZone
-      Digest::MD5
-      Digest::SHA1
-      Encode
-      ExtUtils::CBuilder
-      ExtUtils::Install
-      ExtUtils::MakeMaker
-      ExtUtils::Manifest
-      ExtUtils::ParseXS
-      FCGI
-      File::Path
-      File::Spec
-      File::Temp
-      Filter::Util::Call
-      HTML::Parser
-      if
-      IO
-      IO::Compress::Base
-      IO::Scalar
-      IO::String
-      LWP
-      MIME::Base64
-      MRO::Compat
-      Module::Build
-      Module::Pluggable
-      Moose
-      MooseX::Types
-      namespace::clean
-      Params::Validate
-      Pod::Text
-      Scalar::Util
-      Storable
-      Sub::Exporter
-      Sub::Identify
-      Sub::Install
-      Sub::Name
-      Template::Stash
-      Test::Deep
-      Test::Harness
-      Test::NoWarnings
-      Test::Simple
-      Text::Wrap
-      Time::HiRes
-      Tree::DAG_Node
-      Try::Tiny
-      Variable::Magic
-      version
-      XML::SAX
-      YAML
-  )) { return '>= 5.26 !cperl (Carp)' if $_ eq $module; }}
 }
