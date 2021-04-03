@@ -3,7 +3,7 @@
 #      Copyright (c) 1996, 1997, 1998 Malcolm Beattie
 #      Copyright (c) 2008, 2009, 2010, 2011 Reini Urban
 #      Copyright (c) 2010 Nick Koston
-#      Copyright (c) 2011, 2012, 2013, 2014 cPanel Inc
+#      Copyright (c) 2011, 2012, 2013 cPanel Inc
 #
 #      You may distribute under the terms of either the GNU General Public
 #      License or the Artistic License, as specified in the README file.
@@ -12,13 +12,10 @@
 package B::C;
 use strict;
 
-our $VERSION = '1.52_01';
-our %debug;
+our $VERSION = '1.43';
+my %debug;
 our $check;
 my $eval_pvs = '';
-use Config;
-# Thanks to Mattia Barbon for the C99 tip to init any union members
-my $C99 = $Config{d_c99_variadic_macros}; # http://docs.sun.com/source/819-3688/c99.app.html#pgfId-1003962
 
 package B::C::Section;
 use strict;
@@ -30,11 +27,6 @@ sub new {
   my $class = shift;
   my $o     = $class->SUPER::new(@_);
   push @$o, { values => [] };
-  # if sv add a dummy sv_arenaroot to support global destruction
-  if ($_[0] eq 'sv') {
-    $o->add( "0, 0, SVTYPEMASK|0x01000000".($] >= 5.009005?", {0}":'')); # SVf_FAKE
-    $o->[-1]{dbg}->[0] = "PL_sv_arenaroot";
-  }
   return $o;
 }
 
@@ -51,16 +43,6 @@ sub remove {
 sub index {
   my $section = shift;
   return scalar( @{ $section->[-1]{values} } ) - 1;
-}
-
-sub typename {
-  my $section = shift;
-  my $name = $section->name;
-  my $typename = ( $name eq "xpvcv" ) ? "XPVCV_or_similar" : uc($name);
-  # -fcog hack to statically initialize PVs (SVPV for 5.10-5.11 only)
-  $typename = 'SVPV' if $typename eq 'SV' and $] > 5.009005 and $] < 5.012 and !$C99;
-  # $typename = 'const '.$typename if $name !~ /^(cop_|sv_)/;
-  return $typename;
 }
 
 sub comment {
@@ -83,10 +65,6 @@ sub output {
   return if $B::C::check;
   my $i = 0;
   my $dodbg = 1 if $debug{flags} and $section->[-1]{dbg};
-  if ($section->name eq 'sv') { #fixup arenaroot refcnt
-    my $len = scalar @{ $section->[-1]{values} };
-    $section->[-1]{values}->[0] =~ s/^0, 0/0, $len/;
-  }
   foreach ( @{ $section->[-1]{values} } ) {
     my $dbg = "";
     my $ref = "";
@@ -94,22 +72,14 @@ sub output {
       if (!exists($sym->{$1}) and $1 ne 's\_0') {
         $ref = $1;
         $B::C::unresolved_count++;
-        if ($B::C::verbose) {
-          my $caller = caller(1);
-          warn "Warning: unresolved ".$section->name." symbol $ref\n"
-            if $caller eq 'B::C';
-        }
+        warn "Warning: unresolved ".$section->name." symbol $ref\n" if $B::C::verbose;
       }
     }
     s{(s\\_[0-9a-f]+)}{ exists($sym->{$1}) ? $sym->{$1} : $default; }ge;
     if ($dodbg and $section->[-1]{dbg}->[$i]) {
       $dbg = " /* ".$section->[-1]{dbg}->[$i]." ".$ref." */";
     }
-    if ($format eq "\t{ %s }, /* %s_list[%d] %s */%s\n") {
-      printf $fh $format, $_, $section->name, $i, $ref, $dbg;
-    } else {
-      printf $fh $format, $_;
-    }
+    printf $fh $format, $_, $section->name, $i, $ref, $dbg;
     ++$i;
   }
 }
@@ -179,11 +149,6 @@ sub add_eval {
   push @{ $section->[-1]{evals} }, @strings;
 }
 
-sub pre_destruct {
-  my $section = shift;
-  push @{ $section->[-1]{pre_destruct} }, @_;
-}
-
 sub add_initav {
   my $section = shift;
   push @{ $section->[-1]{initav} }, @_;
@@ -216,6 +181,7 @@ EOT
     $section->SUPER::add("${init_name}_${name}(aTHX);");
     ++$name;
   }
+  $section->SUPER::add("perl_init2(aTHX);") unless $init_name eq 'perl_init2';
   # We need to output evals after dl_init.
   foreach my $s ( @{ $section->[-1]{evals} } ) {
     ${B::C::eval_pvs} .= "    eval_pv(\"$s\",1);\n";
@@ -225,9 +191,6 @@ EOT
 static int ${init_name}(pTHX)
 {
 EOT
-  if ($section->name eq 'init') {
-    print $fh "\tperl_init0(aTHX);\n";
-  }
   $section->SUPER::output( $fh, $format );
   print $fh "\treturn 0;\n}\n";
 }
@@ -242,7 +205,7 @@ our %Regexp;
   my $caller = caller;
   if ( $caller eq 'O' or $caller eq 'Od' ) {
     require XSLoader;
-    XSLoader::load('B::C'); # for r-magic and for utf8-keyed B::HV->ARRAY
+    XSLoader::load('B::C'); # for r-magic only
   }
 }
 
@@ -252,13 +215,13 @@ our @EXPORT_OK =
      init_sections set_callback save_unused_subs objsym save_context fixup_ppaddr
      save_sig svop_or_padop_pv inc_cleanup ivx nvx);
 
-# for 5.6.[01] better use the native B::C
-# but 5.6.2 works fine
+# for 5.6 better use the native B::C
+# 5.6.2 works fine though.
 use B
-  qw(minus_c sv_undef walkoptree walkoptree_slow main_root main_start peekop
+  qw(minus_c sv_undef walkoptree walkoptree_slow walksymtable main_root main_start peekop
   class cchar svref_2object compile_stats comppadlist hash
   threadsv_names main_cv init_av end_av opnumber cstring
-  HEf_SVKEY SVf_POK SVp_POK SVf_ROK SVf_IOK SVf_NOK SVf_IVisUV SVf_READONLY);
+  HEf_SVKEY SVf_POK SVf_ROK SVf_IOK SVf_NOK SVf_IVisUV SVf_READONLY);
 
 BEGIN {
   if ($] >=  5.008) {
@@ -269,40 +232,12 @@ BEGIN {
       sub SVp_NOK() {0}; # unused
       sub SVp_IOK() {0};
       sub CVf_ANON() {4};
-      sub PMf_ONCE() {0xff}; # unused
      ];
     @B::PVMG::ISA = qw(B::PVNV B::RV);
   }
-  sub SVf_UTF8 { 0x20000000 }
-  if ($] >=  5.008001) {
-    B->import(qw(SVt_PVGV)); # added with 5.8.1
-  } else {
-    eval q[sub SVt_PVGV() {13}];
-  }
   if ($] >= 5.010) {
-    require mro; # mro->import();
-    # not exported:
-    sub SVf_OOK { 0x02000000 }
-    eval q[sub SVs_GMG { 0x00200000 }
-           sub SVs_SMG { 0x00400000 }];
-    if ($] >= 5.018) {
-      B->import(qw(PMf_EVAL RXf_EVAL_SEEN));
-      eval q[sub PMf_ONCE(){ 0x10000 }]; # PMf_ONCE also not exported
-    } elsif ($] >= 5.014) {
-      eval q[sub PMf_ONCE(){ 0x8000 }];
-    } elsif ($] >= 5.012) {
-      eval q[sub PMf_ONCE(){ 0x0080 }];
-    } else { # 5.10. not used with <= 5.8
-      eval q[sub PMf_ONCE(){ 0x0002 }];
-    }
-  } else {
-    eval q[sub SVs_GMG { 0x00002000 }
-           sub SVs_SMG { 0x00004000 }];
-  }
-  if ($] < 5.018) {
-    eval q[sub RXf_EVAL_SEEN { 0x0 }
-           sub PMf_EVAL      { 0x0 }
-           ]; # unneeded
+    require mro; mro->import;
+    sub SVf_OOK() { 0x02000000 }; # not exported
   }
 }
 use B::Asmdata qw(@specialsv_name);
@@ -310,6 +245,7 @@ use B::Asmdata qw(@specialsv_name);
 use B::C::Flags;
 use FileHandle;
 #use Carp;
+use Config;
 
 my $hv_index      = 0;
 my $gv_index      = 0;
@@ -337,11 +273,17 @@ my %all_bc_subs = map {$_=>1}
 
 # track all internally used packages. all other may not be deleted automatically
 # - hidden methods
-# uses now @B::C::Flags::deps
-our %all_bc_deps = map {$_=>1}
-  @B::C::Flags::deps ? @B::C::Flags::deps
-  : qw(AnyDBM_File AutoLoader B B::AV B::Asmdata B::BINOP B::BM B::C B::C::Flags B::C::InitSection B::C::Section B::CC B::COP B::CV B::FAKEOP B::FM B::GV B::HE B::HV B::IO B::IV B::LEXWARN B::LISTOP B::LOGOP B::LOOP B::MAGIC B::NULL B::NV B::OBJECT B::OP B::PADLIST B::PADOP B::PMOP B::PV B::PVIV B::PVLV B::PVMG B::PVNV B::PVOP B::REGEXP B::RHE B::RV B::SPECIAL B::STASHGV B::SV B::SVOP B::Section B::UNOP B::UV CORE CORE::GLOBAL Carp Config DB DynaLoader Errno Exporter Exporter::Heavy ExtUtils ExtUtils::Constant ExtUtils::Constant::ProxySubs Fcntl FileHandle IO IO::File IO::Handle IO::Poll IO::Seekable IO::Socket Internals O POSIX PerlIO PerlIO::Layer PerlIO::scalar Regexp SelectSaver Symbol UNIVERSAL XSLoader __ANON__ arybase arybase::mg base fields main maybe maybe::next mro next overload re strict threads utf8 vars version warnings warnings::register);
-
+my %all_bc_pkg = map {$_=>1}
+  qw(B B::AV B::BINOP B::BM B::COP B::CV B::FAKEOP B::GV B::HV
+     B::IO B::IV B::LISTOP B::LOGOP B::LOOP B::NULL B::NV B::OBJECT
+     B::OP B::PADOP B::PMOP B::PV B::PVIV B::PVLV B::PVMG B::PVNV B::PVOP
+     B::REGEXP B::RV B::SPECIAL B::SV B::SVOP B::UNOP B::UV
+     AnyDBM_File Fcntl Regexp overload Errno Exporter Exporter::Heavy Config
+     warnings warnings::register DB next maybe maybe::next fields vars
+     AutoLoader Carp Symbol PerlIO PerlIO::scalar SelectSaver ExtUtils ExtUtils::Constant
+     ExtUtils::Constant::ProxySubs threads base IO::File
+    );
+# keep: FileHandle
 # B::C stash footprint: mainly caused by blib, warnings, and Carp loaded with DynaLoader
 # perl5.15.7d-nt -MO=C,-o/dev/null -MO=Stash -e0
 # -umain,-ure,-umro,-ustrict,-uAnyDBM_File,-uFcntl,-uRegexp,-uoverload,-uErrno,-uExporter,-uExporter::Heavy,-uConfig,-uwarnings,-uwarnings::register,-uDB,-unext,-umaybe,-umaybe::next,-uFileHandle,-ufields,-uvars,-uAutoLoader,-uCarp,-uSymbol,-uPerlIO,-uPerlIO::scalar,-uSelectSaver,-uExtUtils,-uExtUtils::Constant,-uExtUtils::Constant::ProxySubs,-uthreads,-ubase
@@ -356,53 +298,42 @@ our %all_bc_deps = map {$_=>1}
 
 my ($prev_op, $package_pv, @package_pv); # global stash for methods since 5.13
 my (%symtable, %cvforward, %lexwarnsym);
-my (%strtable, %hektable, %gptable);
-my (%xsub, %init2_remap);
-my ($warn_undefined_syms, $swash_init, $swash_ToCf);
+my (%strtable, %hektable, @static_free);
+my %xsub;
+my $warn_undefined_syms;
 my ($staticxs, $outfile);
-my (%include_package, %dumped_package, %skip_package, %isa_cache);
+my (%include_package, %skip_package, %saved, %isa_cache);
 my %static_ext;
 my ($use_xsloader);
 my $nullop_count         = 0;
 my $unresolved_count     = 0;
 # options and optimizations shared with B::CC
-our ($module, $init_name, %savINC, %curINC, $mainfile, @static_free);
+our ($module, $init_name, %savINC, $mainfile);
 our ($use_av_undef_speedup, $use_svpop_speedup) = (1, 1);
-our ($optimize_ppaddr, $optimize_warn_sv, $use_perl_script_name,
+our ($pv_copy_on_grow, $optimize_ppaddr, $optimize_warn_sv, $use_perl_script_name,
     $save_data_fh, $save_sig, $optimize_cop, $av_init, $av_init2, $ro_inc, $destruct,
-    $fold, $warnings, $const_strings, $stash, $can_delete_pkg, $pv_copy_on_grow, $dyn_padlist,
-    $walkall);
+    $fold, $warnings, $const_strings, $stash, $can_delete_pkg);
 our $verbose = 0;
 our %option_map = (
-    #ignored until IsCOW has a seperate COWREFCNT field (5.22 maybe)
     'cog'             => \$B::C::pv_copy_on_grow,
     'const-strings'   => \$B::C::const_strings,
     'save-data'       => \$B::C::save_data_fh,
     'ppaddr'          => \$B::C::optimize_ppaddr,
-    'walkall'         => \$B::C::walkall,
     'warn-sv'         => \$B::C::optimize_warn_sv,
     'av-init'         => \$B::C::av_init,
     'av-init2'        => \$B::C::av_init2,
     'delete-pkg'      => \$B::C::can_delete_pkg,
     'ro-inc'          => \$B::C::ro_inc,
-    'stash'           => \$B::C::stash,    # enable with -fstash
+    'stash'           => \$B::C::stash,    # disable with -fno-stash
     'destruct'        => \$B::C::destruct, # disable with -fno-destruct
     'fold'            => \$B::C::fold,     # disable with -fno-fold
     'warnings'        => \$B::C::warnings, # disable with -fno-warnings
     'use-script-name' => \$use_perl_script_name,
     'save-sig-hash'   => \$B::C::save_sig,
-    'dyn-padlist'     => \$B::C::dyn_padlist, # with -O4, needed for cv cleanup with non-local exits since 5.18
     'cop'             => \$optimize_cop, # XXX very unsafe!
 					 # Better do it in CC, but get rid of
 					 # NULL cops also there.
 );
-our %optimization_map = (
-    0 => [qw()],                    # special case
-    1 => [qw(-fppaddr -fav-init2)], # falls back to -fav-init
-    2 => [qw(-fro-inc -fsave-data)],
-    3 => [qw(-fno-destruct -fconst-strings -fno-fold -fno-warnings)],
-    4 => [qw(-fcop -fno-dyn-padlist)],
-  );
 our %debug_map = (
     'O' => 'op',
     'A' => 'av',
@@ -412,7 +343,6 @@ our %debug_map = (
     'R' => 'rx',
     'G' => 'gv',
     'S' => 'sv',
-    'P' => 'pv',
     'W' => 'walk',
     'c' => 'cops',
     's' => 'sub',
@@ -429,15 +359,14 @@ my $MULTI = $Config{usemultiplicity};
 my $ITHREADS = $Config{useithreads};
 my $DEBUGGING = ($Config{ccflags} =~ m/-DDEBUGGING/);
 my $DEBUG_LEAKING_SCALARS = $Config{ccflags} =~ m/-DDEBUG_LEAKING_SCALARS/;
-my $PERL518  = ( $] >= 5.017010 );
 my $PERL514  = ( $] >= 5.013002 );
 my $PERL512  = ( $] >= 5.011 );
 my $PERL510  = ( $] >= 5.009005 );
 my $PERL56   = ( $] <  5.008001 ); # yes. 5.8.0 is a 5.6.x
-#my $C99 = $Config{d_c99_variadic_macros}; # http://docs.sun.com/source/819-3688/c99.app.html#pgfId-1003962
+# Thanks to Mattia Barbon for the C99 tip to init any union members
+my $C99 = $Config{d_c99_variadic_macros}; # http://docs.sun.com/source/819-3688/c99.app.html#pgfId-1003962
 my $MAD      = $Config{mad};
 my $MYMALLOC = $Config{usemymalloc} eq 'define';
-my $HAVE_DLFCN_DLOPEN = $Config{i_dlfcn} && $Config{d_dlopen};
 my @threadsv_names;
 
 BEGIN {
@@ -447,24 +376,9 @@ BEGIN {
 # This the Carp free workaround for DynaLoader::bootstrap
 sub DynaLoader::croak {die @_}
 
-# needed for init2 remap and Dynamic annotation
-sub dl_module_to_sofile {
-  my $module = shift or die "missing module name";
-  my $modlibname = shift or die "missing module filepath";
-  my @modparts = split(/::/,$module);
-  my $modfname = $modparts[-1];
-  my $modpname = join('/',@modparts);
-  my $c = @modparts;
-  $modlibname =~ s,[\\/][^\\/]+$,, while $c--;    # Q&D basename
-  die "missing module filepath" unless $modlibname;
-  my $sofile = "$modlibname/auto/$modpname/$modfname.".$Config{dlext};
-  return $sofile;
-}
-
 # 5.15.3 workaround [perl #101336], without .bs support
 # XSLoader::load_file($module, $modlibname, ...)
-my $dlext = $Config::Config{dlext};
-eval q|
+eval q{
 sub XSLoader::load_file {
   #package DynaLoader;
   my $module = shift or die "missing module name";
@@ -483,22 +397,17 @@ sub XSLoader::load_file {
   my $c = @modparts;
   $modlibname =~ s,[\\/][^\\/]+$,, while $c--;    # Q&D basename
   die "missing module filepath" unless $modlibname;
-  my $file = "$modlibname/auto/$modpname/$modfname."|.qq(."$dlext").q|;
+  my $file = "$modlibname/auto/$modpname/$modfname."}.$Config::Config{dlext}.q{;
 
   # skip the .bs "bullshit" part, needed for some old solaris ages ago
 
-  print STDOUT "goto DynaLoader::bootstrap_inherit\n"
-      if ${DynaLoader::dl_debug} and not -f $file;
   goto \&DynaLoader::bootstrap_inherit if not -f $file;
-  my $modxsname = $module;
-  $modxsname =~ s/\W/_/g;
-  my $bootname = "boot_".$modxsname;
+  my $bootname = "boot_$module";
+  $bootname =~ s/\W/_/g;
   @DynaLoader::dl_require_symbols = ($bootname);
 
   my $boot_symbol_ref;
   if ($boot_symbol_ref = DynaLoader::dl_find_symbol(0, $bootname)) {
-    print STDOUT "dl_find_symbol($bootname) ok => goto boot\n"
-      if ${DynaLoader::dl_debug};
     goto boot; #extension library has already been loaded, e.g. darwin
   }
   # Many dynamic extension loading problems will appear to come from
@@ -521,19 +430,15 @@ sub XSLoader::load_file {
   $boot_symbol_ref = DynaLoader::dl_find_symbol($libref, $bootname) or do {
     die("Can't find '$bootname' symbol in $file\n");
   };
-  print STDOUT "dl_find_symbol($libref, $bootname) ok => goto boot\n"
-    if ${DynaLoader::dl_debug};
   push(@DynaLoader::dl_modules, $module); # record loaded module
 
  boot:
   my $xs = DynaLoader::dl_install_xsub($boots, $boot_symbol_ref, $file);
-  print STDOUT "dl_install_xsub($boots, $boot_symbol_ref, $file)\n"
-    if ${DynaLoader::dl_debug};
   # See comment block above
   push(@DynaLoader::dl_shared_objects, $file); # record files loaded
   return &$xs(@_);
 }
-| if $] >= 5.015003;
+} if $] >= 5.015003;
 
 # Code sections
 my (
@@ -543,7 +448,7 @@ my (
   $svsect,    $xpvsect,    $xpvavsect, $xpvhvsect, $xpvcvsect,
   $xpvivsect, $xpvuvsect,  $xpvnvsect, $xpvmgsect, $xpvlvsect,
   $xrvsect,   $xpvbmsect, $xpviosect,  $heksect,   $free,
-  $padlistsect, $init0, $init2
+  $padlistsect, $init2
 );
 my @op_sections = \(
   $binopsect,  $condopsect, $copsect,  $padopsect,
@@ -571,8 +476,6 @@ sub walk_and_save_optree {
 # rather than looking up the name of every BASEOP in B::OP
 my $OP_THREADSV = opnumber('threadsv');
 my $OP_DBMOPEN = opnumber('dbmopen');
-my $OP_FORMLINE = opnumber('formline');
-my $OP_UCFIRST = opnumber('ucfirst');
 
 # special handling for nullified COP's.
 my %OP_COP = ( opnumber('nextstate') => 1 );
@@ -649,13 +552,9 @@ sub svop_or_padop_pv {
 sub IsCOW {
   return $] >= 5.017008 and $_[0]->FLAGS & 0x00010000; # since 5.17.8
 }
-sub IsCOW_hek {
-  return IsCOW($_[0]) && !$_[0]->LEN;
-}
 
 sub savesym {
   my ( $obj, $value ) = @_;
-  no strict 'refs';
   my $sym = sprintf( "s\\_%x", $$obj );
   $symtable{$sym} = $value;
   return $value;
@@ -663,7 +562,6 @@ sub savesym {
 
 sub objsym {
   my $obj = shift;
-  no strict 'refs';
   return $symtable{ sprintf( "s\\_%x", $$obj ) };
 }
 
@@ -697,8 +595,8 @@ sub savere {
   my $len = 0; # length( pack "a*", $pv ) + 2;
   if ($PERL514) {
     $xpvsect->add( sprintf( "Nullhv, {0}, %u, %u", $cur, $len ) );
-    $svsect->add( sprintf( "&xpv_list[%d], 1, %x, {%s}", $xpvsect->index,
-                           0x4405, ($C99?".svu_pv=":"").'(char*)'.savepv($pv) ) );
+    $svsect->add( sprintf( "&xpv_list[%d], 1, %x, {(char*)%s}", $xpvsect->index,
+                           0x4405, savepv($pv) ) );
     $sym = sprintf( "&sv_list[%d]", $svsect->index );
   }
   elsif ($PERL510) {
@@ -707,11 +605,11 @@ sub savere {
     #$resect->add(sprintf("0,0,0,%s", cstring($re)));
     my $s1 = ($PERL514 ? "NULL," : "") . "{0}, %u, %u";
     $xpvsect->add( sprintf( $s1, $cur, $len ) );
-    $svsect->add( sprintf( "&xpv_list[%d], 1, %x, {%s}", $xpvsect->index,
-                           0x4405, ($C99?".svu_pv=":"").'(char*)'.savepv($pv) ) );
+    $svsect->add( sprintf( "&xpv_list[%d], 1, %x, {(char*)%s}", $xpvsect->index,
+                           0x4405, savepv($pv) ) );
     my $s = "sv_list[".$svsect->index."]";
     $sym = "&$s";
-    push @B::C::static_free, $s if $len; # and $B::C::pv_copy_on_grow;
+    push @static_free, $s if $len and $B::C::pv_copy_on_grow;
     # $resect->add(sprintf("&xpv_list[%d], %lu, 0x%x", $xpvsect->index, 1, 0x4405));
   }
   else {
@@ -722,29 +620,40 @@ sub savere {
 }
 
 sub constpv {
-  return savepv(shift, 1);
-}
-
-sub savepv {
-  my $pv    = shift;
-  my $const = shift;
-  my $cstring = cstring($pv);
-  # $decl->add( sprintf( "/* %s */", $cstring) ) if $debug{pv};
-  return $strtable{$cstring} if defined $strtable{$cstring};
-  $pv    = pack "a*", $pv;
+  my $pv    = pack "a*", shift;
+  if (defined $strtable{$pv}) {
+    return $strtable{$pv};
+  }
   my $pvsym = sprintf( "pv%d", $pv_index++ );
-  $const = $const ? " const" : "";
+  $strtable{$pv} = "$pvsym";
+  my $const = ($B::C::pv_copy_on_grow and $B::C::const_strings) ? " const" : "";
   if ( defined $max_string_len && length($pv) > $max_string_len ) {
     my $chars = join ', ', map { cchar $_ } split //, $pv;
     $decl->add( sprintf( "Static$const char %s[] = { %s };", $pvsym, $chars ) );
-    $strtable{$cstring} = "$pvsym";
   } else {
+    my $cstring = cstring($pv);
     if ( $cstring ne "0" ) {    # sic
       $decl->add( sprintf( "Static$const char %s[] = %s;", $pvsym, $cstring ) );
-      $strtable{$cstring} = "$pvsym";
     }
   }
-  return wantarray ? ( $pvsym, length($pv) ) : $pvsym;
+  return wantarray ? ( $pvsym, length( pack "a*", $pv ) ) : $pvsym;
+}
+
+sub savepv {
+  return constpv($_[0]) if $B::C::const_strings and $B::C::pv_copy_on_grow; # or readonly
+  my $pv    = pack "a*", shift;
+  my $pvsym = sprintf( "pv%d", $pv_index++ );
+  if ( defined $max_string_len && length($pv) > $max_string_len ) {
+    my $chars = join ', ', map { cchar $_ } split //, $pv;
+    $decl->add( sprintf( "Static char %s[] = { %s };", $pvsym, $chars ) );
+  } else {
+    my $cstring = cstring($pv);
+    if ( $cstring ne "0" ) {    # sic
+      $decl->add( sprintf( "Static char %s[] = %s;", $pvsym, $cstring ) );
+    }
+  }
+  my $len = length( pack "a*", $pv ) + 1;
+  return ( $pvsym, $len );
 }
 
 sub save_rv {
@@ -754,148 +663,52 @@ sub save_rv {
   }
   # confess "Can't save RV: not ROK" unless $sv->FLAGS & SVf_ROK;
   # 5.6: Can't locate object method "RV" via package "B::PVMG"
-  # since 5.11 it must be a PV, the RV was removed from the IV
-  my $rv;
-  #if ($] >= 5.011 and ref($sv) =~ /^B::[IP]V$/) {
-  #  warn "$sv is no IV nor PV\n" if $debug{sv};
-  #  $sv = bless $sv, 'B::PV'; # only observed with DB::args[0]
-  #}
-  #elsif ($] < 5.011 and ref($sv) =~ /^B::[RP]V$/) {
-  #  warn "$sv is no RV nor PV\n" if $debug{sv};
-  #  $sv = bless $sv, 'B::RV';
-  #}
-  $rv = $sv->RV->save($fullname);
+  my $rv = $sv->RV->save($fullname);
+
   $rv =~ s/^\(([AGHS]V|IO)\s*\*\)\s*(\&sv_list.*)$/$2/;
 
   return $rv;
 }
 
-# => savesym, cur, len, pv, static
+# => savesym, cur, len, pv
 sub save_pv_or_rv {
   my ($sv, $fullname) = @_;
 
   my $rok = $sv->FLAGS & SVf_ROK;
   my $pok = $sv->FLAGS & SVf_POK;
-  my $gmg = $sv->FLAGS & SVs_GMG;
-  my $iscow = IsCOW($sv);
-  my ( $cur, $len, $savesym, $pv ) = ( 0, 1, 'NULL', "" );
-  my ($static, $shared_hek);
+  my ( $cur, $len, $savesym, $pv ) = ( 0, 0 );
   # overloaded VERSION symbols fail to xs boot: ExtUtils::CBuilder with Fcntl::VERSION (i91)
   # 5.6: Can't locate object method "RV" via package "B::PV" Carp::Clan
   if ($rok and !$PERL56) {
     # this returns us a SV*. 5.8 expects a char* in xpvmg.xpv_pv
     warn "save_pv_or_rv: save_rv(",$sv,")\n" if $debug{sv};
     $savesym = ($PERL510 ? "" : "(char*)") . save_rv($sv, $fullname);
-    $static = 1; # avoid run-time overwrite of the PV/RV slot (#273)
-    if ($savesym =~ /(\(char\*\))?get_cv\("/) { # Moose::Util::TypeConstraints::Builtins::_RegexpRef
-      $static = 0;
-      $pv = $savesym;
-      $savesym = 'NULL';
-    }
   }
   else {
+    $pv = $pok ? ( pack "a*", $sv->PV ) : undef;
+    $cur = $pok ? length($pv) : 0;
+    my $shared_hek = $PERL510 ? (($sv->FLAGS & 0x09000000) == 0x09000000) : undef;
+    local $B::C::pv_copy_on_grow if $shared_hek;
     if ($pok) {
-      $pv = pack "a*", $sv->PV;
-      $cur = ($sv and $sv->can('CUR') and ref($sv) ne 'B::GV') ? $sv->CUR : length($pv);
-      # comppadname bug with overlong strings
-      if ($] < 5.008008 and $cur > 100 and $fullname =~ / :pad\[0\]/ and $pv =~ /\0\0/) {
-        my $i = index($pv,"\0");
-        if ($i > -1) {
-          $pv = substr($pv,0,$i);
-          $cur = $i;
-          warn "Warning: stripped wrong comppad name for $fullname to ".cstring($pv)."\n"
-            if $verbose;
-        }
+      if ($B::C::pv_copy_on_grow) {
+	( $savesym, $len ) = ($B::C::const_strings and $sv->FLAGS & SVf_READONLY)
+	  ? constpv($pv) : savepv($pv);
+        $len++ if IsCOW($sv) and $cur;
+      } else {
+	( $savesym, $len ) = ( 'ptr_undef', $cur+1 );
+        $len++ if IsCOW($sv) and $cur;
       }
     } else {
-      if ($gmg && $fullname) {
-	no strict 'refs';
-	$pv = ($fullname and ref($fullname)) ? "${$fullname}" : '';
-	$cur = length (pack "a*", $pv);
-	$pok = 1;
-      } else {
-	($pv,$cur) = ("",0);
-      }
-    }
-    $shared_hek = $PERL510 ? (($sv->FLAGS & 0x09000000) == 0x09000000) : undef;
-    $shared_hek = $shared_hek ? 1 : IsCOW_hek($sv);
-    $static = $B::C::const_strings and ($sv->FLAGS & SVf_READONLY) ? 1 : 0;
-    $static = 0 if $shared_hek
-      or ($fullname and ($fullname =~ / :pad/ or ($fullname =~ /^DynaLoader/ and $pv =~ /^boot_/)));
-    $static = 0 if $B::C::const_strings and $fullname and
-      ($fullname =~ /^warnings::(Dead)?Bits/ or $fullname =~ /::AUTOLOAD$/);
-    if ($shared_hek and $pok and !$cur) { #272 empty key
-      warn "use emptystring for empty shared key $fullname\n" if $debug{hv};
-      $savesym = "emptystring";
-      $static = 0;
-    }
-    if ($PERL510) { # force dynamic PADNAME strings
-      if ($] < 5.016) { $static = 0 if $sv->FLAGS & 0x40000000; }      # SVpad_NAME
-      else { $static = 0 if ($sv->FLAGS & 0x40008000 == 0x40008000); } # SVp_SCREAM|SVpbm_VALID
-    }
-    if ($pok) {
-      my $s = "sv_list[" . ($svsect->index + 1) . "]";
-      # static pv (!SvLEN) only valid since cd84013aab030da47b76a44fb3 (sv.c: !SvLEN does not mean undefined)
-      # i.e. since v5.17.6. because conversion to IV would fail.
-      # But a "" or "0" or "[a-z]+" string can have SvLEN=0
-      # since its is converted to 0
-      no warnings 'numeric';
-      if ($static and $] < 5.017006 and abs($pv) > 0) {
-        $static = 0;
-      }
-      # but we can optimize static set-magic ISA entries. #263, #91
-      if ($B::C::const_strings and ref($sv) eq 'B::PVMG' and $sv->FLAGS & SVs_SMG) {
-        $static = 1; # warn "static $fullname";
-      }
-      if ($static) {
-	$len = 0;
-	$savesym = $iscow ? savepv($pv) : constpv($pv);
-        if ($savesym =~ /^(\(char\*\))?get_cv\("/) { # Moose::Util::TypeConstraints::Builtins::_RegexpRef
-          $static = 0;
-	  $len = $cur +1;
-          $pv = $savesym;
-          $savesym = 'NULL';
-        }
-        # align to next wordsize
-        if ($iscow and $cur) {
-          $len = $cur+2;
-        }
-        #push @B::C::static_free, $savesym if $len and $savesym =~ /^pv/ and !$B::C::in_endav;
-      } else {
-	$len = $cur+1;
-        if ($shared_hek) {
-          if ($savesym eq "emptystring") {
-            $free->add("    SvLEN(&$s) = 0;") ;
-          } else {
-            $len = 0;
-          }
-          $free->add("    SvFAKE_off(&$s);");
-        } else {
-          if ($iscow and $cur) {
-            $len++;
-          }
-        }
-      }
-    } else {
-      $len = 0;
+      ( $savesym, $len ) = ( 'ptr_undef', 0 );
     }
   }
-  if ($len and $PERL518) {
-    my $ptrsize = $Config{ptrsize};
-    while ($len % $ptrsize) {
-      $len++;
-    }
-  }
-  warn sprintf("Saving pv %s %s cur=%d, len=%d, static=%d cow=%d %s\n", $savesym, cstring($pv), $cur, $len,
-               $static, $iscow, $shared_hek ? "shared, $fullname" : $fullname) if $debug{pv};
-  return ( $savesym, $cur, $len, $pv, $static );
+  return ( $savesym, $cur, $len, $pv );
 }
 
 # Shared global string in PL_strtab.
 # Mostly GvNAME and GvFILE, but also CV prototypes or bareword hash keys.
 sub save_hek {
   my $str = shift; # not cstring'ed
-  my $dynamic = shift; # not yet implemented. see lexsub CvNAME in CV::save
   my $len = length $str;
   # force empty string for CV prototypes
   if (!$len and !@_) { wantarray ? return ( "NULL", 0 ) : return "NULL"; }
@@ -904,26 +717,17 @@ sub save_hek {
       : $hektable{$str};
   }
   my $cur = length( pack "a*", $str );
-  if (!$PERL56) {
-    if (utf8::is_utf8($str)) {
-      my $pv = $str;
-      utf8::encode($pv);
-      $cur = - length $pv;
-    }
-  }
   my $sym = sprintf( "hek%d", $hek_index++ );
   $hektable{$str} = $sym;
   my $cstr = cstring($str);
-  $decl->add(sprintf("Static HEK *%s;", $sym));
-  warn sprintf("Saving hek %s %s cur=%d\n", $sym, $cstr, $cur)
-    if $debug{pv};
+  $decl->add(sprintf("Static HEK *%s;",$sym));
   # randomized global shared hash keys:
   #   share_hek needs a non-zero hash parameter, unlike hv_store.
   #   Vulnerable to oCERT-2011-003 style DOS attacks?
   #   user-input (object fields) does not affect strtab, it is pretty safe.
   # But we need to randomize them to avoid run-time conflicts
   #   e.g. "Prototype mismatch: sub bytes::length (_) vs (_)"
-  $init->add(sprintf("%s = share_hek(%s, %d, %s);",
+  $init->add(sprintf("%s = share_hek(%s, %u, %s);",
 		     $sym, $cstr, $cur, '0'));
   wantarray ? ( $sym, $cur ) : $sym;
 }
@@ -934,24 +738,12 @@ sub ivx ($) {
   $ivdformat =~ s/"//g; #" poor editor
   my $intmax = (1 << ($Config{ivsize}*4-1)) - 1;
   my $L = 'L';
-  # LL for 32bit -2147483648L or 64bit -9223372036854775808L
+  # LL for 32bit -2147483648L
   $L = 'LL' if $Config{ivsize} == 2*$Config{ptrsize};
   # UL if > INT32_MAX = 2147483647
   my $sval = sprintf("%${ivdformat}%s", $ivx, $ivx > $intmax ? "U$L" : "");
   if ($ivx < -$intmax) {
-    $sval = sprintf("%${ivdformat}%s", $ivx, 'LL'); # DateTime
-  }
-  if ($INC{'POSIX.pm'}) {
-    # i262: LONG_MIN -9223372036854775808L integer constant is so large that it is unsigned
-    if ($ivx == POSIX::LONG_MIN()) {
-      $sval = "PERL_LONG_MIN";
-    }
-    elsif ($ivx == POSIX::LONG_MAX()) {
-      $sval = "PERL_LONG_MAX";
-    }
-    #elsif ($ivx == POSIX::HUGE_VAL()) {
-    #  $sval = "HUGE_VAL";
-    #}
+    $sval = sprintf("%${ivdformat}%s", $ivx, $L); # DateTime
   }
   $sval = '0' if $sval =~ /(NAN|inf)$/i;
   return $sval;
@@ -974,39 +766,9 @@ sub nvx ($) {
   if ($nvx < -$dblmax) {
     $sval = sprintf("%${nvgformat}%s", $nvx, $ll);
   }
-  if ($INC{'POSIX.pm'}) {
-    if ($nvx == POSIX::DBL_MIN()) {
-      $sval = "DBL_MIN";
-    }
-    elsif ($nvx == POSIX::DBL_MAX()) { #1.797693134862316e+308
-      $sval = "DBL_MAX";
-    }
-  }
   $sval = '0' if $sval =~ /(NAN|inf)$/i;
   $sval .= '.00' if $sval =~ /^-?\d+$/;
   return $sval;
-}
-
-# for bytes and utf8 only
-# TODO: Carp::Heavy, Exporter::Heavy
-# special case: warnings::register via -fno-warnings
-sub force_heavy {
-  my $pkg = shift;
-  my $pkg_heavy = $pkg."_heavy.pl";
-  no strict 'refs';
-  if (!$include_package{$pkg_heavy} and !exists $savINC{$pkg_heavy}) {
-    #eval qq[sub $pkg\::AUTOLOAD {
-    #    require '$pkg_heavy';
-    #    goto &\$AUTOLOAD if defined &\$AUTOLOAD;
-    #    warn("Undefined subroutine \$AUTOLOAD called");
-    #  }];
-    #warn "Redefined $pkg\::AUTOLOAD to omit Carp\n" if $debug{gv};
-    warn "Forcing early $pkg_heavy\n" if $debug{pkg};
-    require $pkg_heavy;
-    mark_package($pkg_heavy, 1);
-    #walk_syms($pkg); #before we stub unloaded CVs
-  }
-  return svref_2object( \*{$pkg."::AUTOLOAD"} );
 }
 
 # See also init_op_ppaddr below; initializes the ppaddr to the
@@ -1055,7 +817,6 @@ my $opsect_common =
 # 5.10: unsigned op_opt:1; unsigned op_latefree:1; unsigned op_latefreed:1; unsigned op_attached:1; unsigned op_spare:3;
 # 5.18: unsigned op_opt:1; unsigned op_slabbed:1; unsigned op_savefree:1; unsigned op_static:1; unsigned op_spare:3;
 # 5.19: unsigned op_opt:1; unsigned op_slabbed:1; unsigned op_savefree:1; unsigned op_static:1; unsigned op_folded:1; unsigned op_spare:2;
-# 5.21.2: unsigned op_opt:1; unsigned op_slabbed:1; unsigned op_savefree:1; unsigned op_static:1; unsigned op_folded:1; unsigned op_lastsib:1; unsigned op_spare:1;
   my $static;
   if ( $] < 5.009004 ) {
     $static = sprintf "%u", 65535;
@@ -1081,13 +842,9 @@ my $opsect_common =
     $static = '0, 0, 0, 1, 0';
     $opsect_common .= "opt, slabbed, savefree, static, spare";
   }
-  elsif ($] < 5.021002) {
+  else {
     $static = '0, 0, 0, 1, 0, 0';
     $opsect_common .= "opt, slabbed, savefree, static, folded, spare";
-  }
-  else {
-    $static = '0, 0, 0, 1, 0, 0, 0';
-    $opsect_common .= "opt, slabbed, savefree, static, folded, lastsib, spare";
   }
 
   sub B::OP::_save_common_middle {
@@ -1130,7 +887,7 @@ sub B::OP::_save_common {
       push_package($package_pv);
     } else {
       # mostly optimized-away padsv NULL pads with 5.8
-      warn "package_pv for method_name not found\n" if $debug{cv};
+      warn "package_pv for method_name not found\n" if $debug{cv} or $debug{pkg};
     }
   }
   # $prev_op = $op;
@@ -1150,17 +907,10 @@ sub B::OP::save {
   $nullop_count++ unless $type;
   if ( $type == $OP_THREADSV ) {
     # saves looking up ppaddr but it's a bit naughty to hard code this
-    $init->add(sprintf( "(void)find_threadsv(%s);", cstring( $threadsv_names[ $op->targ ])));
-  }
-  if ( $type == $OP_UCFIRST ) {
-    $B::C::fold = 1;
-    if ($] >= 5.013009) {
-      warn "enabling -ffold with ucfirst\n" if $verbose;
-      require "utf8.pm" unless $savINC{"utf8.pm"};
-      require "utf8_heavy.pl" unless $savINC{"utf8_heavy.pl"}; # bypass AUTOLOAD
-      mark_package("utf8");
-      mark_package("utf8_heavy.pl");
-    }
+    $init->add(
+      sprintf( "(void)find_threadsv(%s);",
+        cstring( $threadsv_names[ $op->targ ] ) )
+    );
   }
   if (ref($op) eq 'B::OP') { # check wrong BASEOPs
     # [perl #80622] Introducing the entrytry hack, needed since 5.12, fixed with 5.13.8 a425677
@@ -1304,24 +1054,6 @@ sub B::UNOP::save {
   $init->add( sprintf( "unop_list[$ix].op_ppaddr = %s;", $op->ppaddr ) )
     unless $B::C::optimize_ppaddr;
   $sym = savesym( $op, "(OP*)&unop_list[$ix]" );
-  if ($op->name eq 'method' and $op->first and $op->first->name eq 'const') {
-    my $method = svop_name($op->first);
-    if (!$method and $ITHREADS) {
-      $method = padop_name($op->first, $B::C::curcv); # XXX (curpad[targ])
-    }
-    warn "method -> const $method\n" if $debug{pkg} and $ITHREADS;
-    #324,#326 need to detect ->(maybe::next|maybe|next)::(method|can)
-    if ($method =~ /^(maybe::next|maybe|next)::(method|can)$/) {
-      warn "mark \"$1\" for method $method\n" if $debug{pkg};
-      mark_package($1, 1);
-      mark_package("mro", 1);
-    } # and also the old 5.8 NEXT|EVERY with non-fixed method names und subpackages
-    elsif ($method =~ /^(NEXT|EVERY)::/) {
-      warn "mark \"$1\" for method $method\n" if $debug{pkg};
-      mark_package($1, 1);
-      mark_package("NEXT", 1) if $1 ne "NEXT";
-    }
-  }
   do_labels ($op, 'first');
   $sym;
 }
@@ -1368,30 +1100,10 @@ sub B::LISTOP::save {
   $sym = savesym( $op, "(OP*)&listop_list[$ix]" );
   if ($op->type == $OP_DBMOPEN) {
     # resolves it at compile-time, not at run-time
-    mark_package('AnyDBM_File'); # to save $INC{AnyDBM_File}
-    require AnyDBM_File unless $savINC{'AnyDBM_File.pm'};
-    $curINC{'AnyDBM_File.pm'} = $INC{'AnyDBM_File.pm'};
-    AnyDBM_File->import;            # strip the @ISA
-    my $dbm = $AnyDBM_File::ISA[0]; # take the winner (only)
+    # mark_package('AnyDBM_File') does too much, just bootstrap the single ISA
+    require AnyDBM_File;
+    my $dbm = $AnyDBM_File::ISA[0];
     svref_2object( \&{"$dbm\::bootstrap"} )->save;
-    svref_2object( \&{"$dbm\::TIEHASH"} )->save; # called by pp_dbmopen
-    $curINC{$dbm.".pm"} = $INC{$dbm.".pm"};
-  } elsif ($op->type == $OP_FORMLINE and $B::C::const_strings) { # -O3 ~
-    # non-static only for all const strings containing ~ #277
-    my $sv;
-    my $fop = $op;
-    my $svop = $op->first;
-    while ($svop != $op and ref($svop) ne 'B::NULL') {
-      if ($svop->name == 'const' and $svop->can('sv')) {
-        $sv = $svop->sv;
-      }
-      if ($sv and $sv->can("PV") and $sv->PV =~ /~/m) {
-        local $B::C::const_strings;
-        warn "force non-static formline arg ",cstring($sv->PV),"\n" if $debug{pv};
-        $svop->save("svop const");
-      }
-      $svop = $svop->next;
-    }
   }
   do_labels ($op, 'first', 'last');
   $sym;
@@ -1460,15 +1172,7 @@ sub B::PVOP::save {
   $init->add( sprintf( "pvop_list[$ix].op_ppaddr = %s;", $op->ppaddr ) )
     unless $B::C::optimize_ppaddr;
   my $pv = pack "a*", $op->pv;
-  my $cur = length($pv);
-  if (!$PERL56) {
-    if (utf8::is_utf8($pv)) {
-      utf8::encode($pv);
-      $cur = length $pv;
-    }
-  }
-  # do not use savepvn here #362
-  $init->add( sprintf( "pvop_list[$ix].op_pv = savesharedpvn(%s, %u);", cstring($pv), $cur ));
+  $init->add( sprintf( "pvop_list[$ix].op_pv = savepvn(%s, %u);", cstring( $pv ), length($pv) ) );
   savesym( $op, "(OP*)&pvop_list[$ix]" );
 }
 
@@ -1487,8 +1191,6 @@ sub push_package ($) {
 sub method_named {
   my $name = shift;
   return unless $name;
-  my $cop = shift;
-  my $loc = $cop ? " at ".$cop->file." line ".$cop->line : "";
   # Note: the pkg PV is unacessible(?) at PL_stack_base+TOPMARK+1.
   # But it is also at the const or padsv after the pushmark, before all args.
   # See L<perloptree/"Call a method">
@@ -1500,7 +1202,6 @@ sub method_named {
   my $method;
   for ($package_pv, @package_pv, 'main') {
     no strict 'refs';
-    next unless defined $_;
     $method = $_ . '::' . $name;
     if (defined(&$method)) {
       warn sprintf( "Found &%s::%s\n", $_, $name ) if $debug{cv};
@@ -1517,90 +1218,9 @@ sub method_named {
       warn "no definition for method_name \"$method\"\n" if $debug{cv};
     }
   }
-  #my $b = $Config{archname}."/B\.pm";
-  #if ($name !~ /^tid|can|isa|pmreplroot$/ and $loc !~ m/$b line / and $package_pv !~ /^B::/) {
-  #  return undef if $ITHREADS;
-  #}
   $method = $name unless $method;
-  if (exists &$method) { # Do not try to save non-existing methods
-    warn "save method_name \"$method\"$loc\n" if $debug{cv};
-    return svref_2object( \&{$method} );
-  } else {
-    return 0;
-  }
-}
-
-
-# scalar: pv. list: (stash,pv,sv)
-# pads are not named, but may be typed
-sub padop_name {
-  my $op = shift;
-  my $cv = shift;
-  if ($op->can('name')
-      and ($op->name eq 'padsv' or $op->name eq 'method_named'
-	   or ref($op) eq 'B::SVOP')) #threaded
-  {
-    return () if $cv and ref($cv->PADLIST) eq 'B::SPECIAL';
-    my @c = ($cv and ref($cv) eq 'B::CV' and ref($cv->PADLIST) ne 'B::NULL')
-             ? $cv->PADLIST->ARRAY : comppadlist->ARRAY;
-    my @pad = $c[1]->ARRAY;
-    my @types = $c[0]->ARRAY;
-    my $ix = $op->can('padix') ? $op->padix : $op->targ;
-    my $sv = $pad[$ix];
-    my $t = $types[$ix];
-    if (defined($t) and ref($t) ne 'B::SPECIAL') {
-      my $pv = $sv->can("PV") ? $sv->PV : ($t->can('PVX') ? $t->PVX : '');
-      # need to fix B for SVpad_TYPEDI without formal STASH
-      my $stash = (ref($t) eq 'B::PVMG' and ref($t->SvSTASH) ne 'B::SPECIAL') ? $t->SvSTASH->NAME : '';
-      return wantarray ? ($stash,$pv,$sv) : $pv;
-    } elsif ($sv) {
-      my $pv = $sv->PV if $sv->can("PV");
-      my $stash = $sv->STASH->NAME if $sv->can("STASH");
-      return wantarray ? ($stash,$pv,$sv) : $pv;
-    }
-  }
-}
-
-sub svop_name {
-  my $op = shift;
-  my $cv = shift;
-  my $sv;
-  if ($op->can('name') and $op->name eq 'padsv') {
-    my @r = padop_name($op, $cv);
-    return wantarray ? @r : ($r[1] ? $r[1] : $r[0]);
-  } else {
-    if (!$op->can("sv")) {
-      if (ref($op) eq 'B::PMOP' and $op->pmreplroot->can("sv")) {
-	$sv = $op->pmreplroot->sv;
-      } else {
-	$sv = $op->first->sv unless $op->flags & 4
-	  or ($op->name eq 'const' and $op->flags & 34) or $op->first->can("sv");
-      }
-    } else {
-      $sv = $op->sv;
-    }
-    if ($sv and $$sv) {
-      if ($sv->FLAGS & SVf_ROK) {
-	return '' if $sv->isa("B::NULL");
-	my $rv = $sv->RV;
-	if ($rv->isa("B::PVGV")) {
-	  my $o = $rv->IO;
-	  return $o->STASH->NAME if $$o;
-	}
-	return '' if $rv->isa("B::PVMG");
-	return $rv->STASH->NAME;
-      } else {
-	if ($op->name eq 'gvsv') {
-	  return wantarray ? ($sv->STASH->NAME, $sv->NAME) : $sv->STASH->NAME.'::'.$sv->NAME;
-	} elsif ($op->name eq 'gv') {
-	  return wantarray ? ($sv->STASH->NAME, $sv->NAME) : $sv->STASH->NAME.'::'.$sv->NAME;
-	} else {
-	  return $sv->can('STASH') ? $sv->STASH->NAME
-	    : $sv->can('NAME') ? $sv->NAME : $sv->PV;
-	}
-      }
-    }
-  }
+  warn "save method_name \"$method\"\n" if $debug{cv};
+  return svref_2object( \&{$method} );
 }
 
 # return the next COP for file and line info
@@ -1615,28 +1235,17 @@ sub B::SVOP::save {
   my $sym = objsym($op);
   return $sym if defined $sym;
   my $svsym = 'Nullsv';
+  my $sv;
   # XXX moose1 crash with 5.8.5-nt, Cwd::_perl_abs_path also
   if ($op->name eq 'aelemfast' and $op->flags & 128) { #OPf_SPECIAL
     $svsym = '&PL_sv_undef'; # pad does not need to be saved
     warn sprintf("SVOP->sv aelemfast pad %d\n", $op->flags) if $debug{sv};
-  } elsif ($op->name eq 'gv' and $op->next and $op->next->name eq 'rv2cv'
-	   and $op->next->next and $op->next->next->name eq 'defined' ) {
-    # 96 do not save a gvsv->cv if just checked for defined'ness
-    my $gv = $op->sv;
-    my $gvsv = svop_name($op);
-    if ($gvsv !~ /^DynaLoader::/) {
-      warn "skip saving defined(&$gvsv)\n" if $debug{gv}; # defer to run-time
-      $svsym  = '(SV*)' . $gv->save( 8 ); # ~Save_CV in B::GV::save
-    } else {
-      $svsym  = '(SV*)' . $gv->save();
-    }
   } else {
     my $sv    = $op->sv;
     $svsym  = '(SV*)' . $sv->save("svop ".$op->name);
-    warn "Error: SVOP: ".$op->name." $sv $svsym" if $svsym =~ /^\(SV\*\)lexwarn/; #322
   }
   if ($op->name eq 'method_named') {
-    my $cv = method_named(svop_or_padop_pv($op), nextcop($op));
+    my $cv = method_named(svop_or_padop_pv($op));
     $cv->save if $cv;
   }
   my $is_const_addr = $svsym =~ m/Null|\&/;
@@ -1661,29 +1270,9 @@ sub B::PADOP::save {
   my ( $op, $level ) = @_;
   my $sym = objsym($op);
   return $sym if defined $sym;
-  my $skip_defined;
   if ($op->name eq 'method_named') {
-    my $cv = method_named(svop_or_padop_pv($op), nextcop($op));
+    my $cv = method_named(svop_or_padop_pv($op));
     $cv->save if $cv;
-  } elsif ($op->name eq 'gv' and $op->next and $op->next->name eq 'rv2cv'
-	   and $op->next->next and $op->next->next->name eq 'defined' ) {
-    # 96 do not save a gvsv->cv if just checked for defined'ness
-    $skip_defined++;
-  }
-  # This is saved by curpad syms at the end. But with __DATA__ handles it is better to save earlier
-  if ($op->name eq 'padsv' or $op->name eq 'gvsv' or $op->name eq 'gv') {
-    my @c = comppadlist->ARRAY;
-    my @pad = $c[1]->ARRAY;
-    my $ix = $op->can('padix') ? $op->padix : $op->targ;
-    my $sv = $pad[$ix];
-    if ($sv and $$sv) {
-      my $name = padop_name($op, $B::C::curcv);
-      if ($skip_defined and $name !~ /^DynaLoader::/) {
-	warn "skip saving defined(&$name)\n" if $debug{gv}; # defer to run-time
-      } else {
-	$sv->save("padop ". ($name ? $name : ''));
-      }
-    }
   }
   $padopsect->comment("$opsect_common, padix");
   $padopsect->add( sprintf( "%s, %d", $op->_save_common, $op->padix ) );
@@ -1699,8 +1288,7 @@ sub B::COP::save {
   my $sym = objsym($op);
   return $sym if defined $sym;
 
-  # we need to keep CvSTART cops, so check $level == 0
-  if ($optimize_cop and $level and !$op->label) { # XXX very unsafe!
+  if ($optimize_cop and !$op->label) { # XXX very unsafe!
     my $sym = savesym( $op, $op->next->save );
     warn sprintf( "Skip COP (0x%x) => %s (0x%x), line %d file %s\n",
                   $$op, $sym, $op->next, $op->line, $op->file ) if $debug{cops};
@@ -1715,46 +1303,54 @@ sub B::COP::save {
   my $warn_sv;
   my $warnings   = $op->warnings;
   my $is_special = ref($warnings) eq 'B::SPECIAL';
-  my $warnsvcast = $PERL510 ? "(STRLEN*)" : "(SV*)";
-  if ( $is_special && $$warnings == 4 ) { # use warnings 'all';
-    $warn_sv = 'pWARN_ALL';
+  my $warnsvcast = $PERL510 ? "STRLEN*" : "SV*";
+  if ( $is_special && $$warnings == 4 ) {
+    # use warnings 'all';
+    $warn_sv =
+      $B::C::optimize_warn_sv
+      ? "INT2PTR($warnsvcast,1)".($verbose ?' /*pWARN_ALL*/':'')
+      : 'pWARN_ALL';
   }
-  elsif ( $is_special && $$warnings == 5 ) { # no warnings 'all';
-    $warn_sv = 'pWARN_NONE';
+  elsif ( $is_special && $$warnings == 5 ) {
+    # no warnings 'all';
+    $warn_sv =
+      $B::C::optimize_warn_sv
+      ? "INT2PTR($warnsvcast,2)".($verbose ?' /*pWARN_NONE*/':'')
+      : 'pWARN_NONE';
   }
-  elsif ($is_special) { # use warnings;
-    $warn_sv = 'pWARN_STD';
+  elsif ($is_special) {
+    # use warnings;
+    $warn_sv =
+      $B::C::optimize_warn_sv
+      ? "INT2PTR($warnsvcast,3)".($verbose ?' /*pWARN_STD*/':'')
+      : 'pWARN_STD';
   }
   else {
     # LEXWARN_on: Original $warnings->save from 5.8.9 was wrong,
     # DUP_WARNINGS copied length PVX bytes.
-    my $warn = bless $warnings, "B::LEXWARN";
-    $warn_sv = $warn->save;
+    $warnings = bless $warnings, "B::LEXWARN";
+    $warn_sv = $warnings->save;
     my $ix = $copsect->index + 1;
     # XXX No idea how a &sv_list[] came up here, a re-used object. Anyway.
     $warn_sv = substr($warn_sv,1) if substr($warn_sv,0,3) eq '&sv';
-    $warn_sv = $warnsvcast.'&'.$warn_sv;
-    $free->add( sprintf( "    cop_list[%d].cop_warnings = NULL;", $ix ) )
-      if !$B::C::optimize_warn_sv or !$PERL510;
-    #push @B::C::static_free, sprintf("cop_list[%d]", $ix);
+    $warn_sv = "($warnsvcast)&".$warn_sv.($verbose ?' /*lexwarn*/':'');
+    $free->add( sprintf( "    cop_list[%d].cop_warnings = NULL;", $ix ) );
+    #push @static_free, sprintf("cop_list[%d]", $ix);
   }
-
-  my $dynamic_copwarn = ($PERL510 and !$is_special) ? 1 : !$B::C::optimize_warn_sv;
 
   # Trim the .pl extension, to print the executable name only.
   my $file = $op->file;
-  # $file =~ s/\.pl$/.c/;
+  $file =~ s/\.pl$/.c/;
   if ($PERL512) {
     if ($ITHREADS and $] >= 5.017) {
       $copsect->comment(
 	      "$opsect_common, line, stashoff, file, hints, seq, warnings, hints_hash");
       $copsect->add(
 	sprintf(
-		"%s, %u, " . "%d, %s, %u, " . "%s, %s, NULL",
+		"%s, %u, " . "%d, %s, 0, " . "%s, %s, NULL",
 		$op->_save_common, $op->line,
-		$op->stashoff, "NULL", #hints=0
-                $op->hints,
-		ivx($op->cop_seq), !$dynamic_copwarn ? $warn_sv : 'NULL'
+		$op->stashoff, "(char*)".constpv( $file ), #hints=0
+		ivx($op->cop_seq), $B::C::optimize_warn_sv ? $warn_sv : 'NULL'
 	       ));
     } elsif ($ITHREADS and $] >= 5.016) {
       # [perl #113034] [PATCH] 2d8d7b1 replace B::COP::stashflags by B::COP::stashlen (5.16.0 only)
@@ -1762,25 +1358,25 @@ sub B::COP::save {
 	      "$opsect_common, line, stashpv, file, stashlen, hints, seq, warnings, hints_hash");
       $copsect->add(
 	sprintf(
-		"%s, %u, " . "%s, %s, %d, %u, " . "%s, %s, NULL",
+		"%s, %u, " . "%s, %s, %d, 0, " . "%s, %s, NULL",
 		$op->_save_common, $op->line,
-		"NULL", "NULL",
+		"(char*)".constpv( $op->stashpv ), # we can store this static
+		"(char*)".constpv( $file ),
 		# XXX at broken 5.16.0 with B-1.34 we do non-utf8, non-null only (=> negative len),
 		# 5.16.0 B-1.35 has stashlen, 5.16.1 we will see.
 		$op->can('stashlen') ? $op->stashlen : length($op->stashpv),
-                $op->hints,
-		ivx($op->cop_seq), !$dynamic_copwarn ? $warn_sv : 'NULL'
+		ivx($op->cop_seq), $B::C::optimize_warn_sv ? $warn_sv : 'NULL'
 	       ));
     } elsif ($ITHREADS and $] >= 5.015004 and $] < 5.016) {
       $copsect->comment(
 	      "$opsect_common, line, stashpv, file, stashflags, hints, seq, warnings, hints_hash");
       $copsect->add(
 	sprintf(
-                "%s, %u, " . "%s, %s, %d, %u, " . "%s, %s, NULL",
-                $op->_save_common, $op->line,
-                "NULL", "NULL",
-                $op->stashflags, $op->hints,
-                ivx($op->cop_seq), !$dynamic_copwarn ? $warn_sv : 'NULL'
+              "%s, %u, " . "%s, %s, %d, 0, " . "%u, %s, NULL",
+              $op->_save_common, $op->line,
+	      "(char*)".constpv( $op->stashpv ), # we can store this static
+	      "(char*)".constpv( $file ), $op->stashflags,
+              ivx($op->cop_seq), $B::C::optimize_warn_sv ? $warn_sv : 'NULL'
 	       ));
     } else {
       # cop_label now in hints_hash (Change #33656)
@@ -1788,11 +1384,12 @@ sub B::COP::save {
 	      "$opsect_common, line, stash, file, hints, seq, warn_sv, hints_hash");
       $copsect->add(
 	sprintf(
-                "%s, %u, " . "%s, %s, %u, " . "%s, %s, NULL",
-                $op->_save_common, $op->line,
-                $ITHREADS ? "NULL" : "Nullhv",# we cannot store this static (attribute exit)
-                $ITHREADS ? "NULL" : "Nullgv",
-                $op->hints, ivx($op->cop_seq), !$dynamic_copwarn ? $warn_sv : 'NULL'
+              "%s, %u, " . "%s, %s, 0, " . "%u, %s, NULL",
+              $op->_save_common, $op->line,
+	      $ITHREADS ? "(char*)".constpv( $op->stashpv ) : "Nullhv",# we can store this static
+	      $ITHREADS ? "(char*)".constpv( $file ) : "Nullgv",
+              ivx($op->cop_seq),
+              ( $B::C::optimize_warn_sv ? $warn_sv : 'NULL' )
 	       ));
     }
     if ( $op->label ) {
@@ -1816,11 +1413,12 @@ sub B::COP::save {
   }
   elsif ($PERL510) {
     $copsect->comment("$opsect_common, line, label, stash, file, hints, seq, warnings, hints_hash");
-    $copsect->add(sprintf("%s, %u, %s, " . "%s, %s, %u, " . "%u, %s, NULL",
+    $copsect->add(sprintf("%s, %u, %s, " . "%s, %s, 0, " . "%u, %s, NULL",
 			  $op->_save_common,     $op->line, 'NULL',
-			  "NULL", "NULL",
-                          $op->hints, $op->cop_seq, !$dynamic_copwarn ? $warn_sv : 'NULL'
-                         ));
+			  $ITHREADS ? "(char*)".constpv( $op->stashpv ) : "NULL", # we can store this static
+			  $ITHREADS ? "(char*)".constpv( $file ) : "NULL",
+			  $op->cop_seq,
+			  ( $B::C::optimize_warn_sv ? $warn_sv : 'NULL' )));
     if ($op->label) {
       $init->add(sprintf( "CopLABEL_set(&cop_list[%d], CopLABEL_alloc(%s));",
 			  $copsect->index, cstring( $op->label ) ));
@@ -1831,11 +1429,12 @@ sub B::COP::save {
     $copsect->comment("$opsect_common, label, stash, file, seq, arybase, line, warn_sv, io");
     $copsect->add(
       sprintf(
-	      "%s, %s, %s, %s, %s, %d, %u, %s %s",
+	      "%s, %s, %s, %s, %u, %d, %u, %s %s",
 	      $op->_save_common, cstring( $op->label ),
-	      "NULL", "NULL",
-	      ivx($op->cop_seq), $op->arybase,
-	      $op->line, !$dynamic_copwarn ? $warn_sv : 'NULL',
+	      $ITHREADS ? "(char*)".constpv( $op->stashpv ) : "NULL", # we can store this static
+	      $ITHREADS ? "(char*)".constpv( $file ) : "NULL",
+	      ivx($op->cop_seq),      $op->arybase,
+	      $op->line, ( $B::C::optimize_warn_sv ? $warn_sv : 'NULL' ),
 	      ( $PERL56 ? "" : ", 0" )
 	     )
     );
@@ -1844,45 +1443,20 @@ sub B::COP::save {
   my $ix = $copsect->index;
   $init->add( sprintf( "cop_list[$ix].op_ppaddr = %s;", $op->ppaddr ) )
     unless $B::C::optimize_ppaddr;
-  if ($PERL510 and !$is_special) {
-    my $copw = $warn_sv;
-    $copw =~ s/^\(STRLEN\*\)&//;
-    # on cv_undef (scope exit, die, Attribute::Handler, ...) CvROOT and kids are freed.
-    # so lexical cop_warnings need to be dynamic.
-    if ($copw) {
-      my $dest = "cop_list[$ix].cop_warnings";
-      # with DEBUGGING savepvn returns ptr + PERL_MEMORY_DEBUG_HEADER_SIZE
-      # which is not the address which will be freed in S_cop_free.
-      # Need to use old-style PerlMemShared_, see S_cop_free in op.c (#362)
-      # lexwarn<n> might be also be STRLEN* 0
-      $init->add("if ($copw) $dest = (STRLEN*)savesharedpvn((const char*)$copw, sizeof($copw));");
+  $init->add( sprintf( "cop_list[$ix].cop_warnings = %s;", $warn_sv ) )
+    unless $B::C::optimize_warn_sv;
+
+  push @static_free, "cop_list[$ix]" if $ITHREADS;
+  if (!$ITHREADS) {
+    $init->add(
+      sprintf( "CopFILE_set(&cop_list[$ix], %s);", constpv( $file ) )
+    ) if !$B::C::optimize_cop;
+    my $stpv = constpv( $op->stashpv );
+    my $stlen = "";
+    if ($] >= 5.016 and $] <= 5.017) {
+      $stlen = ", ".length($op->stashpv);
     }
-  } else {
-    $init->add( sprintf( "cop_list[$ix].cop_warnings = %s;", $warn_sv ) )
-      unless $B::C::optimize_warn_sv;
-  }
-  #push @B::C::static_free, "cop_list[$ix]" if $ITHREADS;
-  if (!$B::C::optimize_cop) {
-    if (!$ITHREADS) {
-      if ($B::C::const_strings) {
-        $init->add(sprintf( "CopSTASHPV_set(&cop_list[%d], %s);",
-                            $ix, constpv($op->stashpv) ),
-                   sprintf( "CopFILE_set(&cop_list[%d], %s);",
-                            $ix, constpv($file) ));
-      } else {
-        $init->add(sprintf( "CopSTASHPV_set(&cop_list[%d], %s);",
-                            $ix, cstring($op->stashpv) ),
-                   sprintf( "CopFILE_set(&cop_list[%d], %s);",
-                            $ix, cstring($file) ));
-      }
-    } else { # cv_undef e.g. in bproto.t and many more core tests with threads
-      my $stlen = "";
-      if ($] >= 5.016 and $] <= 5.017) { # 5.16 special-case API
-        $stlen = ", ".length($op->stashpv);
-      }
-      $init->add(sprintf( "CopSTASHPV_set(&cop_list[$ix], %s);", cstring($op->stashpv).$stlen ));
-      $init->add(sprintf( "CopFILE_set(&cop_list[$ix], %s);", cstring($file) ));
-    }
+    $init->add(sprintf( "CopSTASHPV_set(&cop_list[$ix], %s);", $stpv));
   }
 
   # our root: store all packages from this file
@@ -1942,23 +1516,10 @@ sub B::PMOP::save {
         "%s, s\\_%x, s\\_%x, %u, 0x%x, {%s}, {%s}",
         $op->_save_common, ${ $op->first },
         ${ $op->last }, ( $ITHREADS ? $op->pmoffset : 0 ),
-        $op->pmflags, $replrootfield, 'NULL'
+        $op->pmflags, $replrootfield,
+        $replstartfield
       )
     );
-    $init->add(sprintf("pmop_list[%d].op_pmstashstartu.op_pmreplstart = (OP*)$replstartfield;",
-                       $pmopsect->index));
-    if ($] >= 5.017) {
-      my $code_list = $op->code_list;
-      if ($code_list and $$code_list) {
-        warn sprintf("saving pmop_list[%d] code_list $code_list (?{})\n", $pmopsect->index)
-          if $debug{gv};
-        my $code_op = $code_list->save;
-        $init->add(sprintf("pmop_list[%d].op_code_list = %s;", # (?{}) code blocks
-                           $pmopsect->index, $code_op)) if $code_op;
-        warn sprintf("done saving pmop_list[%d] code_list $code_list (?{})\n", $pmopsect->index)
-          if $debug{gv};
-      }
-    }
   }
   elsif ($PERL56) {
     # pmdynflags does not exist as B method. It is only used for PMdf_UTF8 dynamically,
@@ -1998,75 +1559,24 @@ sub B::PMOP::save {
   my $pm = sprintf( "pmop_list[%d]", $pmopsect->index );
   $init->add( sprintf( "$pm.op_ppaddr = %s;", $ppaddr ) )
     unless $B::C::optimize_ppaddr;
-  my $re;
-  if ($] >= 5.010 and $] < 5.011 and $ITHREADS) { # XXX lots of module fails with 5.10.1d
-    if (ref($op) eq 'B::PMOP') {
-      eval { $re = $op->precomp; } #out of memory: Module::Pluggable, Carp::Clan - threaded
-    }
-  } else {
-    $re = $op->precomp;
-  }
+  my $re = $op->precomp; #out of memory: Module::Pluggable, Carp::Clan - threaded
   if ( defined($re) ) {
     $Regexp{$$op} = $op;
     if ($PERL510) {
       # TODO minor optim: fix savere( $re ) to avoid newSVpvn;
-      my $qre = cstring($re);
-      my $relen = length( pack "a*", $re );
-      # precomp does not set the utf8 flag (#333, #338)
-      my $isutf8 = 0; # ($] > 5.008 and utf8::is_utf8($re)) ? SVf_UTF8 : 0;
-      for my $c (split//, $re) {
-        if (ord($c) > 127) { $isutf8 = 1; next }
-      }
-      if (!$PERL56 and $isutf8) {
-        if (utf8::is_utf8($re)) {
-          my $pv = $re;
-          utf8::encode($pv);
-          $relen = length $pv;
-        }
-      }
+      my $resym = cstring($re);
+      my $relen = length($re);
       my $pmflags = $op->pmflags;
-      warn "pregcomp $pm $qre:$relen".($isutf8?" SVf_UTF8":"").sprintf(" 0x%x\n",$pmflags)
-        if $debug{pv} or $debug{gv};
       # Since 5.13.10 with PMf_FOLD (i) we need to swash_init("utf8::Cased").
       if ($] >= 5.013009 and $pmflags & 4) {
         # Note: in CORE utf8::SWASHNEW is demand-loaded from utf8 with Perl_load_module()
-        require "utf8_heavy.pl" unless $savINC{"utf8_heavy.pl"}; # bypass AUTOLOAD
+        require "utf8_heavy.pl" unless $INC{"utf8_heavy.pl"}; # bypass AUTOLOAD
         svref_2object( \&{"utf8\::SWASHNEW"} )->save; # for swash_init(), defined in lib/utf8_heavy.pl
-        if ($PERL518 and !$swash_init and $swash_ToCf) {
-          $init->add("PL_utf8_tofold = $swash_ToCf;");
-          $swash_init++;
-        }
       }
-      if ($] >= 5.018 and $op->reflags & RXf_EVAL_SEEN) { # set HINT_RE_EVAL on
-        $pmflags |= PMf_EVAL;
-        $init->add("{",
-                   "  U32 hints_sav = PL_hints;",
-                   "  PL_hints |= HINT_RE_EVAL;");
-      }
-      if ($] > 5.008008) { # can do utf8 qr
-        $init->add( # XXX Modification of a read-only value attempted. use DateTime - threaded
-          "PM_SETRE(&$pm,",
-          "  CALLREGCOMP(newSVpvn_flags($qre, $relen, "
-          .sprintf("SVs_TEMP|%s), 0x%x));", $isutf8 ? 'SVf_UTF8' : '0', $pmflags),
-          sprintf("RX_EXTFLAGS(PM_GETRE(&$pm)) = 0x%x;", $op->reflags ));
-      } else {
-        $init->add
-          ("PM_SETRE(&$pm,",
-           "  CALLREGCOMP(newSVpvn($qre, $relen), ".sprintf("0x%x));", $pmflags),
-           sprintf("RX_EXTFLAGS(PM_GETRE(&$pm)) = 0x%x;", $op->reflags ));
-        $init->add("SvUTF8_on(PM_GETRE(&$pm));") if $isutf8;
-      }
-      if ($] >= 5.018 and $op->reflags & RXf_EVAL_SEEN) { # set HINT_RE_EVAL off
-        $init->add("  PL_hints = hints_sav;",
-                   "}");
-      }
-      # See toke.c:8964
-      # set in the stash the PERL_MAGIC_symtab PTR to the PMOP: ((PMOP**)mg->mg_ptr) [elements++] = pm;
-      if ($PERL510 and $op->pmflags & PMf_ONCE()) {
-        my $stash = $MULTI ? $op->pmstashpv
-          : ref $op->pmstash eq 'B::HV' ? $op->pmstash->NAME : '__ANON__';
-        $Regexp{$$op} = $op; #188: restore PMf_ONCE, set PERL_MAGIC_symtab in $stash
-      }
+      $init->add( # XXX Modification of a read-only value attempted. use DateTime - threaded
+        "PM_SETRE(&$pm, CALLREGCOMP(newSVpvn($resym, $relen), ".sprintf("0x%x));", $pmflags),
+        sprintf("RX_EXTFLAGS(PM_GETRE(&$pm)) = 0x%x;", $op->reflags )
+      );
     }
     elsif ($PERL56) {
       my ( $resym, $relen ) = savere( $re, 0 );
@@ -2093,7 +1603,7 @@ sub B::PMOP::save {
 }
 
 sub B::SPECIAL::save {
-  my ($sv, $fullname) = @_;
+  my ($sv) = @_;
   # special case: $$sv is not the address but an index into specialsv_list
   #   warn "SPECIAL::save specialsv $$sv\n"; # debug
   @specialsv_name = qw(Nullsv &PL_sv_undef &PL_sv_yes &PL_sv_no pWARN_ALL pWARN_NONE)
@@ -2108,7 +1618,7 @@ sub B::SPECIAL::save {
 sub B::OBJECT::save { }
 
 sub B::NULL::save {
-  my ($sv, $fullname) = @_;
+  my ($sv) = @_;
   my $sym = objsym($sv);
   return $sym if defined $sym;
 
@@ -2120,39 +1630,34 @@ sub B::NULL::save {
 
   my $i = $svsect->index + 1;
   warn "Saving SVt_NULL sv_list[$i]\n" if $debug{sv};
-  $svsect->add( sprintf( "0, %lu, 0x%x".
-                         ($PERL510?", {0}":''),
-                         $sv->REFCNT, $sv->FLAGS ) );
-  #$svsect->debug( $fullname, $sv->flagspv ) if $debug{flags}; # XXX where is this possible?
-  if ($debug{flags} and (!$ITHREADS or $]>=5.014) and $DEBUG_LEAKING_SCALARS) { # add index to sv_debug_file to easily find the Nullsv
+  $svsect->add( sprintf( "0, %lu, 0x%x".($PERL510?', {(char*)ptr_undef}':''), $sv->REFCNT, $sv->FLAGS ) );
+  #$svsect->debug( $sv->flagspv ) if $debug{flags}; # XXX where is this possible?
+  if ($debug{flags} and $]>5.009 and $DEBUG_LEAKING_SCALARS) { # add index to sv_debug_file to easily find the Nullsv
     # $svsect->debug( "ix added to sv_debug_file" );
-    $init->add(sprintf(qq(sv_list[%d].sv_debug_file = savesharedpv("NULL sv_list[%d] 0x%x");),
+    $init->add(sprintf(qq(sv_list[%d].sv_debug_file = savepv("NULL sv_list[%d] 0x%x");),
 		       $svsect->index, $svsect->index, $sv->FLAGS));
   }
   savesym( $sv, sprintf( "&sv_list[%d]", $svsect->index ) );
 }
 
 sub B::UV::save {
-  my ($sv, $fullname) = @_;
+  my ($sv) = @_;
   my $sym = objsym($sv);
   return $sym if defined $sym;
-  my $uvuformat = $Config{uvuformat};
-  $uvuformat =~ s/"//g; #" poor editor
   if ($PERL514) {
-    # issue 145 warn $sv->UVX, " ", sprintf("%Lu", $sv->UVX);
-    $xpvuvsect->add( sprintf( "Nullhv, {0}, 0, 0, {%".$uvuformat."U}", $sv->UVX ) );
+    $xpvuvsect->add( sprintf( "Nullhv, {0}, 0, 0, {%luU}", $sv->UVX ) );
   } elsif ($PERL510) {
-    $xpvuvsect->add( sprintf( "{0}, 0, 0, {%".$uvuformat."U}", $sv->UVX ) );
+    $xpvuvsect->add( sprintf( "{0}, 0, 0, {%luU}", $sv->UVX ) );
   } else {
-    $xpvuvsect->add( sprintf( "0, 0, 0, %".$uvuformat."U", $sv->UVX ) );
+    $xpvuvsect->add( sprintf( "0, 0, 0, %luU", $sv->UVX ) );
   }
   $svsect->add(
     sprintf(
-      "&xpvuv_list[%d], %lu, 0x%x".($PERL510?', {'.($C99?".svu_pv=":"").'NULL}':''),
+      "&xpvuv_list[%d], %lu, 0x%x".($PERL510?', {(char*)ptr_undef}':''),
       $xpvuvsect->index, $sv->REFCNT, $sv->FLAGS
     )
   );
-  $svsect->debug( $fullname, $sv->flagspv ) if $debug{flags};
+  $svsect->debug( $sv->flagspv ) if $debug{flags};
   warn sprintf( "Saving IV(UV) 0x%x to xpvuv_list[%d], sv_list[%d], called from %s:%s\n",
     $sv->UVX, $xpvuvsect->index, $svsect->index, @{[(caller(1))[3]]}, @{[(caller(0))[2]]} )
     if $debug{sv};
@@ -2171,7 +1676,6 @@ sub B::IV::save {
   if ($svflags & SVf_IVisUV) {
     return $sv->B::UV::save;
   }
-  my $ivx = ivx($sv->IVX);
   my $i = $svsect->index + 1;
   if ($svflags & 0xff and !($svflags & (SVf_IOK|SVp_IOK))) { # Not nullified
     unless (($PERL510 and $svflags & 0x00010000) # PADSTALE - out of scope lexical is !IOK
@@ -2181,19 +1685,19 @@ sub B::IV::save {
     }
   }
   if ($PERL514) {
-    $xpvivsect->add( sprintf( "Nullhv, {0}, 0, 0, {%s}", $ivx ) );
+    $xpvivsect->add( sprintf( "Nullhv, {0}, 0, 0, {%s}", ivx($sv->IVX) ) );
   } elsif ($PERL510) {
-    $xpvivsect->add( sprintf( "{0}, 0, 0, {%s}", $ivx ) );
+    $xpvivsect->add( sprintf( "{0}, 0, 0, {%s}", ivx($sv->IVX) ) );
   } else {
-    $xpvivsect->add( sprintf( "0, 0, 0, %s", $ivx ) );
+    $xpvivsect->add( sprintf( "0, 0, 0, %s", ivx($sv->IVX) ) );
   }
   $svsect->add(
     sprintf(
-      "&xpviv_list[%d], %lu, 0x%x".($PERL510?', {'.($C99?".svu_pv=":"").'NULL}':''),
+      "&xpviv_list[%d], %lu, 0x%x".($PERL510?', {(char*)ptr_undef}':''),
       $xpvivsect->index, $sv->REFCNT, $svflags
     )
   );
-  $svsect->debug( $fullname, $sv->flagspv ) if $debug{flags};
+  $svsect->debug( $sv->flagspv ) if $debug{flags};
   warn sprintf( "Saving IV 0x%x to xpviv_list[%d], sv_list[%d], called from %s:%s\n",
     $sv->IVX, $xpvivsect->index, $svsect->index, @{[(caller(1))[3]]}, @{[(caller(0))[2]]} )
     if $debug{sv};
@@ -2201,7 +1705,7 @@ sub B::IV::save {
 }
 
 sub B::NV::save {
-  my ($sv, $fullname) = @_;
+  my ($sv) = @_;
   my $sym = objsym($sv);
   return $sym if defined $sym;
   my $nv = nvx($sv->NV);
@@ -2225,7 +1729,7 @@ sub B::NV::save {
       $xpvnvsect->index, $sv->REFCNT, $sv->FLAGS, $PERL510 ? ', {0}' : ''
     )
   );
-  $svsect->debug( $fullname, $sv->flagspv ) if $debug{flags};
+  $svsect->debug( $sv->flagspv ) if $debug{flags};
   warn sprintf( "Saving NV %s to xpvnv_list[%d], sv_list[%d]\n",
     $nv, $xpvnvsect->index, $svsect->index )
     if $debug{sv};
@@ -2233,11 +1737,11 @@ sub B::NV::save {
 }
 
 sub savepvn {
-  my ( $dest, $pv, $sv, $cur ) = @_;
+  my ( $dest, $pv, $sv ) = @_;
   my @init;
 
   # work with byte offsets/lengths
-  $pv = pack "a*", $pv if defined $pv;
+  $pv = pack "a*", $pv;
   if ( defined $max_string_len && length($pv) > $max_string_len ) {
     push @init, sprintf( "Newx(%s,%u,char);", $dest, length($pv) + 2 );
     my $offset = 0;
@@ -2250,7 +1754,7 @@ sub savepvn {
     }
     push @init, sprintf( "%s[%u] = '\\0';", $dest, $offset );
     warn sprintf( "Copying overlong PV %s to %s\n", cstring($pv), $dest )
-      if $debug{sv} or $debug{pv};
+      if $debug{sv};
   }
   else {
     # If READONLY and FAKE use newSVpvn_share instead. (test 75)
@@ -2259,37 +1763,34 @@ sub savepvn {
       my $hek = save_hek($pv);
       push @init, sprintf( "%s = HEK_KEY($hek);", $dest ) unless $hek eq 'NULL';
       if ($DEBUGGING) { # we have to bypass a wrong HE->HEK assert in hv.c
-	push @B::C::static_free, $dest;
+	push @static_free, $dest;
       }
     } else {
-      my $cstr = cstring($pv);
-      my $cur = $cur ? $cur
-        : ($sv and ref($sv) and $sv->can('CUR') and ref($sv) ne 'B::GV')
-          ? $sv->CUR : length(pack "a*", $pv);
-      if ($sv and IsCOW($sv)) {
-        $pv .= "\0\001";
-        $cstr = cstring($pv);
-        $cur += 2;
-      }
-      warn sprintf( "Saving PV %s:%d to %s\n", $cstr, $cur, $dest ) if $debug{sv};
-      $cur = 0 if $cstr eq "" and $cur == 7; # 317
-      push @init, sprintf( "%s = savepvn(%s, %u);", $dest, $cstr, $cur );
+      warn sprintf( "Saving PV %s to %s\n", cstring($pv), $dest ) if $debug{sv};
+      push @init, sprintf( "%s = savepvn(%s, %u);", $dest, cstring($pv), length($pv) );
     }
   }
   return @init;
 }
 
 sub B::PVLV::save {
-  my ($sv, $fullname) = @_;
+  my ($sv) = @_;
   my $sym = objsym($sv);
   if (defined $sym) {
     if ($in_endav) {
       warn "in_endav: static_free without $sym\n" if $debug{av};
-      @B::C::static_free = grep {!/$sym/} @B::C::static_free;
+      @static_free = grep {!/$sym/} @static_free;
     }
     return $sym;
   }
-  my ($pvsym, $cur, $len, $pv, $static) = save_pv_or_rv ($sv, $fullname);
+  my $pv  = $sv->PV;
+  my $cur = length( pack "a*", $pv );
+  my $shared_hek = $PERL510 ? (($sv->FLAGS & 0x09000000) == 0x09000000) : undef;
+  my ( $pvsym, $len ) = ($B::C::const_strings and $sv->FLAGS & SVf_READONLY and !$shared_hek)
+    ? constpv($pv) : savepv($pv);
+  $len = 0 if $B::C::pv_copy_on_grow or $shared_hek;
+  $len++ if $len and IsCOW($sv);
+  $pvsym = "(char*)$pvsym";# if $B::C::const_strings and $sv->FLAGS & SVf_READONLY;
   my ( $lvtarg, $lvtarg_sym ); # XXX missing
   if ($PERL514) {
     $xpvlvsect->comment('STASH, MAGIC, CUR, LEN, GvNAME, xnv_u, TARGOFF, TARGLEN, TARG, TYPE');
@@ -2297,7 +1798,7 @@ sub B::PVLV::save {
        sprintf("Nullhv, {0}, %u, %d, 0/*GvNAME later*/, %s, %u, %u, Nullsv, %s",
 	       $cur, $len, nvx($sv->NVX),
 	       $sv->TARGOFF, $sv->TARGLEN, cchar( $sv->TYPE ) ));
-    $svsect->add(sprintf("&xpvlv_list[%d], %lu, 0x%x, {(char*)%s}",
+    $svsect->add(sprintf("&xpvlv_list[%d], %lu, 0x%x, {%s}",
                          $xpvlvsect->index, $sv->REFCNT, $sv->FLAGS, $pvsym));
   } elsif ($PERL510) {
     $xpvlvsect->comment('xnv_u, CUR, LEN, GvNAME, MAGIC, STASH, TARGOFF, TARGLEN, TARG, TYPE');
@@ -2306,42 +1807,53 @@ sub B::PVLV::save {
 	       nvx($sv->NVX), $cur, $len,
 	       $sv->TARGOFF, $sv->TARGLEN, cchar( $sv->TYPE ) ));
     $svsect->add(sprintf("&xpvlv_list[%d], %lu, 0x%x, {%s}",
-                         $xpvlvsect->index, $sv->REFCNT, $sv->FLAGS,
-                         ($C99?".svu_pv = (char*)":"(char*)").$pvsym));
+                         $xpvlvsect->index, $sv->REFCNT, $sv->FLAGS, $pvsym));
   } else {
     $xpvlvsect->comment('PVX, CUR, LEN, IVX, NVX, TARGOFF, TARGLEN, TARG, TYPE');
     $xpvlvsect->add(
-       sprintf("(char*)%s, %u, %u, %s, %s, 0, 0, %u, %u, Nullsv, %s",
+       sprintf("%s, %u, %u, %s, %s, 0, 0, %u, %u, Nullsv, %s",
 	       $pvsym, $cur, $len, ivx($sv->IVX), nvx($sv->NVX),
 	       $sv->TARGOFF, $sv->TARGLEN, cchar( $sv->TYPE ) ));
     $svsect->add(sprintf("&xpvlv_list[%d], %lu, 0x%x",
                          $xpvlvsect->index, $sv->REFCNT, $sv->FLAGS));
   }
-  $svsect->debug( $fullname, $sv->flagspv ) if $debug{flags};
+  $svsect->debug( $sv->flagspv ) if $debug{flags};
   my $s = "sv_list[".$svsect->index."]";
-  if ( !$static ) {
+  if ( !$B::C::pv_copy_on_grow ) {
     if ($PERL510) {
-      $init->add( savepvn( "$s.sv_u.svu_pv", $pv, $sv, $cur ) );
+      $init->add( savepvn( "$s.sv_u.svu_pv", $pv, $sv ) );
     }
     else {
-      $init->add( savepvn( sprintf( "xpvlv_list[%d].xpv_pv", $xpvlvsect->index ), $pv, $cur ) );
+      $init->add(
+        savepvn( sprintf( "xpvlv_list[%d].xpv_pv", $xpvlvsect->index ), $pv ) );
+    }
+  } else {
+    if ($shared_hek) { # avoid free of static hek's
+      $free->add("    SvFAKE_off(&$s);");
+    } else {
+      push @static_free, $s if $len and !$in_endav;
     }
   }
-  $sv->save_magic($fullname);
+  $sv->save_magic;
   savesym( $sv, "&".$s );
 }
 
 sub B::PVIV::save {
-  my ($sv, $fullname) = @_;
+  my ($sv) = @_;
   my $sym = objsym($sv);
   if (defined $sym) {
     if ($in_endav) {
       warn "in_endav: static_free without $sym\n" if $debug{av};
-      @B::C::static_free = grep {!/$sym/} @B::C::static_free;
+      @static_free = grep {!/$sym/} @static_free;
     }
     return $sym;
   }
-  my ( $savesym, $cur, $len, $pv, $static ) = save_pv_or_rv($sv, $fullname);
+  my $shared_hek = $PERL510 ? (($sv->FLAGS & 0x09000000) == 0x09000000) : undef;
+  local $B::C::pv_copy_on_grow;
+  $B::C::pv_copy_on_grow = 1 if $B::C::const_strings and $sv->FLAGS & SVf_READONLY;
+  my ( $savesym, $cur, $len, $pv ) = save_pv_or_rv($sv);
+  $savesym = "(char*)$savesym";
+  $len = 0 if $B::C::pv_copy_on_grow or $shared_hek;
   if ($PERL514) {
     $xpvivsect->comment('STASH, MAGIC, cur, len, IVX');
     $xpvivsect->add( sprintf( "Nullhv, {0}, %u, %u, {%s}", $cur, $len, ivx($sv->IVX) ) ); # IVTYPE long
@@ -2351,21 +1863,27 @@ sub B::PVIV::save {
   } else {
     #$iv = 0 if $sv->FLAGS & (SVf_IOK|SVp_IOK);
     $xpvivsect->comment('PVX, cur, len, IVX');
-    $xpvivsect->add( sprintf( "(char*)%s, %u, %u, %s",
+    $xpvivsect->add( sprintf( "%s, %u, %u, %s",
 			      $savesym, $cur, $len, ivx($sv->IVX) ) ); # IVTYPE long
   }
   $svsect->add(
     sprintf("&xpviv_list[%d], %u, 0x%x %s",
-            $xpvivsect->index, $sv->REFCNT, $sv->FLAGS,
-	    $PERL510 ? ", {".($C99?".svu_pv=":"")."(char*)$savesym}" : '' ) );
-  $svsect->debug( $fullname, $sv->flagspv ) if $debug{flags};
+            $xpvivsect->index, $sv->REFCNT, $sv->FLAGS, $PERL510 ? ', {(char*)ptr_undef}' : '' ) );
+  $svsect->debug( $sv->flagspv ) if $debug{flags};
   my $s = "sv_list[".$svsect->index."]";
   if ( defined($pv) ) {
-    if ( !$static ) {
+    if ( !$B::C::pv_copy_on_grow ) {
       if ($PERL510) {
-	$init->add( savepvn( "$s.sv_u.svu_pv", $pv, $sv, $cur ) );
+	$init->add( savepvn( "$s.sv_u.svu_pv", $pv, $sv ) );
       } else {
-	$init->add( savepvn( sprintf( "xpviv_list[%d].xpv_pv", $xpvivsect->index ), $pv, $cur ) );
+	$init->add
+	  (savepvn( sprintf( "xpviv_list[%d].xpv_pv", $xpvivsect->index ), $pv ) );
+      }
+    } else {
+      if ($shared_hek) { # avoid free of static hek's
+	$free->add("    SvFAKE_off(&$s);");
+      } else {
+	push @static_free, $s if $len and !$in_endav;
       }
     }
   }
@@ -2373,18 +1891,25 @@ sub B::PVIV::save {
 }
 
 sub B::PVNV::save {
-  my ($sv, $fullname) = @_;
+  my ($sv) = @_;
   my $sym = objsym($sv);
   if (defined $sym) {
     if ($in_endav) {
       warn "in_endav: static_free without $sym\n" if $debug{av};
-      @B::C::static_free = grep {!/$sym/} @B::C::static_free;
+      @static_free = grep {!/$sym/} @static_free;
     }
     return $sym;
   }
-  my ( $savesym, $cur, $len, $pv, $static ) = save_pv_or_rv($sv, $fullname);
+  my $shared_hek = $PERL510 ? (($sv->FLAGS & 0x09000000) == 0x09000000) : undef;
+  local $B::C::pv_copy_on_grow;
+  $B::C::pv_copy_on_grow = 1 if $B::C::const_strings
+    and !$shared_hek
+    and $sv->FLAGS & SVf_READONLY;
+  my ( $savesym, $cur, $len, $pv ) = save_pv_or_rv($sv);
+  $savesym = substr($savesym,0,1) ne "(" ? "(char*)".$savesym : $savesym;
+  $len = 0 if $B::C::pv_copy_on_grow or $shared_hek;
   my $nvx;
-  my $ivx = ivx($sv->IVX); # here must be IVX!
+  my $ivx = $sv->IVX; # here must be IVX!
   if ($sv->FLAGS & (SVf_NOK|SVp_NOK)) {
     # it could be a double, or it could be 2 ints - union xpad_cop_seq
     $nvx = nvx($sv->NV);
@@ -2401,10 +1926,10 @@ sub B::PVNV::save {
     # For some time the stringification works of NVX double to two ints worked ok.
     if ($PERL514) {
       $xpvnvsect->comment('STASH, MAGIC, cur, len, IVX, NVX');
-      $xpvnvsect->add(sprintf( "Nullhv, {0}, %u, %u, {%s}, {%s}", $cur, $len, $ivx, $nvx) );
+      $xpvnvsect->add(sprintf( "Nullhv, {0}, %u, %u, {%ld}, {%s}", $cur, $len, $ivx, $nvx) );
     } else {
       $xpvnvsect->comment('NVX, cur, len, IVX');
-      $xpvnvsect->add(sprintf( "{%s}, %u, %u, {%s}", $nvx, $cur, $len, $ivx ) );
+      $xpvnvsect->add(sprintf( "{%s}, %u, %u, {%ld}", $nvx, $cur, $len, $ivx ) );
     }
     unless ($C99 or $sv->FLAGS & (SVf_NOK|SVp_NOK)) {
       warn "NV => run-time union xpad_cop_seq init\n" if $debug{sv};
@@ -2418,21 +1943,32 @@ sub B::PVNV::save {
   }
   else {
     $xpvnvsect->comment('PVX, cur, len, IVX, NVX');
-    $xpvnvsect->add(sprintf( "(char*)%s, %u, %u, %s, %s", $savesym, $cur, $len, $ivx, $nvx ) );
+    if ($savesym =~ /^\(char\*\)get_cv\("/) { #" Moose 5.8.9d Moose::Util::TypeConstraints::OptimizedConstraints::RegexpRef
+      $xpvnvsect->add(sprintf( "%s, %u, %u, %d, %s", 'NULL', $cur, $len, $ivx, $nvx ) );
+      $init->add(sprintf("xpvnv_list[%d].xpv_pv = %s;", $xpvnvsect->index, $savesym));
+    } else {
+      $xpvnvsect->add(sprintf( "%s, %u, %u, %d, %s", $savesym, $cur, $len, $ivx, $nvx ) );
+    }
   }
   $svsect->add(
     sprintf("&xpvnv_list[%d], %lu, 0x%x %s",
-            $xpvnvsect->index, $sv->REFCNT, $sv->FLAGS,
-            $PERL510 ? ", {".($C99?".svu_pv=":"")."(char*)$savesym}" : '' ) );
-  $svsect->debug( $fullname, $sv->flagspv ) if $debug{flags};
+            $xpvnvsect->index, $sv->REFCNT, $sv->FLAGS, $PERL510 ? ', {(char*)ptr_undef}' : '' ) );
+  $svsect->debug( $sv->flagspv ) if $debug{flags};
   my $s = "sv_list[".$svsect->index."]";
   if ( defined($pv) ) {
-    if ( !$static ) {
+    if ( !$B::C::pv_copy_on_grow or $] < 5.010) {
       if ($PERL510) {
-	$init->add( savepvn( "$s.sv_u.svu_pv", $pv, $sv, $cur ) );
+	$init->add( savepvn( "$s.sv_u.svu_pv", $pv, $sv ) );
       }
       else {
-        $init->add( savepvn( sprintf( "xpvnv_list[%d].xpv_pv", $xpvnvsect->index ), $pv, $cur ) );
+        $init->add(
+          savepvn( sprintf( "xpvnv_list[%d].xpv_pv", $xpvnvsect->index ), $pv ) );
+      }
+    } else {
+      if ($shared_hek) { # avoid free of static hek's
+	$free->add("    SvFAKE_off(&$s);");
+      } else {
+	push @static_free, $s if $len and !$in_endav;
       }
     }
   }
@@ -2440,47 +1976,46 @@ sub B::PVNV::save {
 }
 
 sub B::BM::save {
-  my ($sv, $fullname) = @_;
+  my ($sv) = @_;
   my $sym = objsym($sv);
   return $sym if !$PERL510 and defined $sym;
   $sv = bless $sv, "B::BM" if $PERL510;
   my $pv  = pack "a*", ( $sv->PV . "\0" . $sv->TABLE );
-  my $cur = $sv->CUR;
-  my $len = $cur + length($sv->TABLE) + 1;
-  my $s;
+  my $len = length(pack "a*", $sv->PV);
   if ($PERL510) {
     warn "Saving FBM for GV $sym\n" if $debug{gv};
     $init->add( sprintf( "$sym = (GV*)newSV_type(SVt_PVGV);" ),
 		sprintf( "SvFLAGS($sym) = 0x%x;", $sv->FLAGS),
 		sprintf( "SvREFCNT($sym) = %u;", $sv->REFCNT + 1 ),
 		sprintf( "SvPVX($sym) = %s;", cstring($pv) ),
-		sprintf( "SvCUR_set($sym, %d);", $cur ),
 		sprintf( "SvLEN_set($sym, %d);", $len ),
                 sprintf( "BmRARE($sym) = %d;", $sv->RARE ),
                 sprintf( "BmPREVIOUS($sym) = %d;", $sv->PREVIOUS ),
                 sprintf( "BmUSEFUL($sym) = %d;", $sv->USEFUL )
               );
   } else {
-    my $static;
+    local $B::C::pv_copy_on_grow;
+    $B::C::pv_copy_on_grow = 1
+      if $B::C::const_strings and $sv->FLAGS & SVf_READONLY and $] != 5.008009;
     $xpvbmsect->comment('pvx,cur,len(+258),IVX,NVX,MAGIC,STASH,USEFUL,PREVIOUS,RARE');
     $xpvbmsect->add(
        sprintf("%s, %u, %u, %s, %s, 0, 0, %d, %u, 0x%x",
-	       defined($pv) && $static ? cstring($pv) : "NULL",
-	       $cur, $len, ivx($sv->IVX), nvx($sv->NVX),
+	       defined($pv) && $B::C::pv_copy_on_grow ? cstring($pv) : "(char*)ptr_undef",
+	       $len,        $len + 258,    ivx($sv->IVX), nvx($sv->NVX),
 	       $sv->USEFUL, $sv->PREVIOUS, $sv->RARE
 	      ));
     $svsect->add(sprintf("&xpvbm_list[%d], %lu, 0x%x",
                          $xpvbmsect->index, $sv->REFCNT, $sv->FLAGS));
-    $svsect->debug( $fullname, $sv->flagspv ) if $debug{flags};
-    $s = "sv_list[".$svsect->index."]";
-    if (!$static) {
-      $init->add(savepvn( sprintf( "xpvbm_list[%d].xpv_pv", $xpvbmsect->index ), $pv, 0, $len ) );
+    $svsect->debug( $sv->flagspv ) if $debug{flags};
+    my $s = "sv_list[".$svsect->index."]";
+    if (!$B::C::pv_copy_on_grow) {
+      $init->add(savepvn( sprintf( "xpvbm_list[%d].xpv_pv", $xpvbmsect->index ), $pv ) );
     } else {
-      push @B::C::static_free, $s if defined($pv) and !$in_endav;
+      push @static_free, $s if defined($pv) and !$in_endav;
     }
   }
   # Restore possible additional magic. fbm_compile adds just 'B'.
-  $sv->save_magic($fullname);
+  $sv->save_magic;
 
   if ($PERL510) {
     return $sym;
@@ -2490,7 +2025,7 @@ sub B::BM::save {
     }
     # cur+len was broken on all B::C versions
     #$init->add(sprintf( "xpvbm_list[%d].xpv_cur = %u;", $xpvbmsect->index, $len ) );
-    return savesym( $sv, "&".$s );
+    return savesym( $sv, sprintf( "&sv_list[%d]", $svsect->index ) );
   }
 }
 
@@ -2500,38 +2035,36 @@ sub B::PV::save {
   if (defined $sym) {
     if ($in_endav) {
       warn "in_endav: static_free without $sym\n" if $debug{av};
-      @B::C::static_free = grep {!/$sym/} @B::C::static_free;
+      @static_free = grep {!/$sym/} @static_free;
     }
     return $sym;
   }
   my $flags = $sv->FLAGS;
   my $shared_hek = $PERL510 ? (($flags & 0x09000000) == 0x09000000) : undef;
-  $shared_hek = $shared_hek ? 1 : IsCOW_hek($sv);
-  my ( $savesym, $cur, $len, $pv, $static ) = save_pv_or_rv($sv, $fullname);
-  $static = 0 if !($flags & SVf_ROK) and $sv->PV and $sv->PV =~ /::bootstrap$/;
+  local $B::C::pv_copy_on_grow;
+  $B::C::pv_copy_on_grow = 1 if $B::C::const_strings
+    and !$shared_hek
+    and $flags & SVf_READONLY;
+  # XSLoader reuses this SV, so it must be dynamic
+  $B::C::pv_copy_on_grow = 0 if !($flags & SVf_ROK) and $sv->PV and $sv->PV =~ /::bootstrap$/;
+  my ( $savesym, $cur, $len, $pv ) = save_pv_or_rv($sv, $fullname);
   my $refcnt = $sv->REFCNT;
+  # $refcnt-- if $B::C::pv_copy_on_grow;
   # static pv, do not destruct. test 13 with pv0 "3".
+  $len = 0 if $B::C::pv_copy_on_grow or $shared_hek;
   if ($PERL510) {
     if ($B::C::const_strings and !$shared_hek and $flags & SVf_READONLY and !$len) {
+      #=> constpv: turnoff SVf_FAKE
       $flags &= ~0x01000000;
-      warn sprintf("constpv turn off SVf_FAKE %s %s %s\n", $sym, cstring($pv), $fullname)
-        if $debug{pv};
     }
     $xpvsect->add( sprintf( "%s{0}, %u, %u", $PERL514 ? "Nullhv, " : "", $cur, $len ) );
     $svsect->add( sprintf( "&xpv_list[%d], %lu, 0x%x, {%s}",
                            $xpvsect->index, $refcnt, $flags,
-			   $savesym eq 'NULL' ? '0' :
-                             ($C99?".svu_pv=(char*)":"(char*)").$savesym ));
-    if ( defined($pv) and !$static ) {
-      if ($shared_hek) {
-        my $hek = save_hek($pv);
-        $init->add( sprintf( "sv_list[%d].sv_u.svu_pv = HEK_KEY(%s);", $svsect->index, $hek ))
-                    unless $hek eq 'NULL';
-      } else {
-        $init->add( savepvn( sprintf( "sv_list[%d].sv_u.svu_pv", $svsect->index ), $pv, $sv, $cur ) );
-      }
+                           defined($pv) && $B::C::pv_copy_on_grow ? "(char*)$savesym" : "(char*)ptr_undef"));
+    if ( defined($pv) and !$B::C::pv_copy_on_grow ) {
+      $init->add( savepvn( sprintf( "sv_list[%d].sv_u.svu_pv", $svsect->index ), $pv, $sv ) );
     }
-    if ($debug{flags} and (!$ITHREADS or $]>=5.014) and $DEBUG_LEAKING_SCALARS) { # add sv_debug_file
+    if ($debug{flags} and $DEBUG_LEAKING_SCALARS) { # add sv_debug_file
       $init->add(sprintf(qq(sv_list[%d].sv_debug_file = %s" sv_list[%d] 0x%x";),
 			 $svsect->index, cstring($pv) eq '0' ? '"NULL"' : cstring($pv),
 			 $svsect->index, $sv->FLAGS));
@@ -2541,36 +2074,31 @@ sub B::PV::save {
     $xpvsect->add( sprintf( "%s, %u, %u", "(char*)$savesym", $cur, $len ) );
     $svsect->add(sprintf("&xpv_list[%d], %lu, 0x%x",
 			 $xpvsect->index, $refcnt, $flags));
-    if ( defined($pv) and !$static ) {
-      $init->add( savepvn( sprintf( "xpv_list[%d].xpv_pv", $xpvsect->index ), $pv, 0, $cur ) );
+    if ( defined($pv) and !$B::C::pv_copy_on_grow ) {
+      $init->add( savepvn( sprintf( "xpv_list[%d].xpv_pv", $xpvsect->index ), $pv ) );
     }
   }
   my $s = "sv_list[".$svsect->index."]";
-  $svsect->debug( $fullname, $sv->flagspv ) if $debug{flags};
+  if ( $B::C::pv_copy_on_grow ) {
+    if ($shared_hek) { # avoid free of static hek's
+      $free->add("    SvFAKE_off(&$s);");
+    } else {
+      push @static_free, $s if defined($pv) and !$in_endav;
+    }
+  }
+  $svsect->debug( $sv->flagspv ) if $debug{flags};
   savesym( $sv, "&".$s );
 }
 
 sub lexwarnsym {
-  my $pv = shift;
-  if ($lexwarnsym{$pv}) {
-    return $lexwarnsym{$pv};
+  my $iv = shift;
+  if ($lexwarnsym{$iv}) {
+    return $lexwarnsym{$iv};
   } else {
-    my $sym = sprintf( "lexwarn%d", $pv_index++ );
-    if ($] < 5.009) { # need a SV->PV
-      $decl->add( sprintf( "Static SV* %s;", $sym ));
-      $init->add( sprintf( "$sym = newSVpvn(%s, %d);", cstring($pv), length $pv));
-    } else {
-      # if 8 use UVSIZE, if 4 use LONGSIZE
-      my $t = ($Config{longsize} == 8) ? "J" : "L";
-      my ($iv) = unpack($t, $pv); # unsigned longsize
-      if ($iv >= 0 and $iv <= 2) { # specialWARN: single STRLEN
-        $decl->add( sprintf( "Static const STRLEN* %s = %d;", $sym, $iv ));
-      } else { # sizeof(STRLEN) + (WARNsize)
-        my $packedpv = pack("$t a*",length($pv), $pv);
-        $decl->add( sprintf( "Static const char %s[] = %s;", $sym, cstring($packedpv) ));
-      }
-    }
-    $lexwarnsym{$pv} = $sym;
+    warn "internal warning: lexwarn value $iv looks wrong\n" if $iv > 66000;
+    my $sym = sprintf( "iv%d", $pv_index++ );
+    $decl->add( sprintf( "Static const STRLEN %s = %d;", $sym, $iv ) );
+    $lexwarnsym{$iv} = $sym;
     return $sym;
   }
 }
@@ -2578,158 +2106,47 @@ sub lexwarnsym {
 # pre vs. post 5.8.9/5.9.4 logic for lexical warnings
 @B::LEXWARN::ISA = qw(B::PV B::IV);
 sub B::LEXWARN::save {
-  my ($sv, $fullname) = @_;
-  my $pv = $] >= 5.008009 ? $sv->PV : $sv->IV;
-  return lexwarnsym($pv); # look for shared const int's
+  my ($sv) = @_;
+  my $sym = objsym($sv);
+  return $sym if defined $sym;
+  my $iv = $] >= 5.008009 ? length($sv->PVX) : $sv->IV;
+  if ($] < 5.009004 and $] >= 5.009) { $iv = length($sv->PVX); }
+  my $ivsym = lexwarnsym($iv); # look for shared const int's
+  return savesym($sv, $ivsym);
 }
 
 # post 5.11: When called from save_rv not from PMOP::save precomp
 sub B::REGEXP::save {
-  my ($sv, $fullname) = @_;
+  my ($sv) = @_;
   my $sym = objsym($sv);
   return $sym if defined $sym;
   my $pv = $sv->PV;
-  my $cur = $sv->CUR;
-  # construct original PV
-  $pv =~ s/^(\(\?\^[adluimsx-]*\:)(.*)\)$/$2/;
-  $cur -= length($sv->PV) - length($pv);
-  my $cstr = cstring($pv);
+  my $cur = length(pack("a*", $pv));
   # Unfortunately this XPV is needed temp. Later replaced by struct regexp.
   $xpvsect->add( sprintf( "%s{0}, %u, %u", $PERL514 ? "Nullhv, " : "", $cur, 0 ) );
   $svsect->add(sprintf("&xpv_list[%d], %lu, 0x%x, {%s}",
-		       $xpvsect->index, $sv->REFCNT, $sv->FLAGS, $] > 5.017006 ? "NULL" : $cstr));
+  		       $xpvsect->index, $sv->REFCNT, $sv->FLAGS, cstring($pv)));
   my $ix = $svsect->index;
-  warn "Saving RX $cstr to sv_list[$ix]\n" if $debug{rx} or $debug{sv};
+  warn "Saving RX \"".$sv->PV."\" to sv_list[$ix], called from @{[(caller(1))[3]]}, "
+    ."@{[(caller(2))[3]]}, @{[(caller(3))[3]]}, @{[(caller(4))[3]]}\n" if $debug{rx} or $debug{sv};
+  if (0) {
+    my $pkg = $sv->SvSTASH;
+    if ($$pkg) {
+      warn sprintf("stash isa class($pkg) 0x%x\n", $$pkg) if $debug{mg} or $debug{gv};
+      $pkg->save;
+      $init->add( sprintf( "SvSTASH_set(s\\_%x, s\\_%x);", $$sv, $$pkg ) );
+      $init->add( sprintf( "SvREFCNT((SV*)s\\_%x) += 1;", $$pkg ) );
+    }
+  }
   if ($] > 5.011) {
-    $init->add(# replace sv_any->XPV with struct regexp. need pv and extflags
-               sprintf("SvANY(&sv_list[$ix]) = SvANY(CALLREGCOMP(newSVpvn(%s, %d), 0x%x));",
-                       $cstr, $cur, $sv->EXTFLAGS));
+    $init->add(# replace XVP with struct regexp. need pv and extflags
+               sprintf("SvANY(&sv_list[$ix]) = SvANY(CALLREGCOMP(&sv_list[$ix], 0x%x));",
+		     $sv->EXTFLAGS));
   }
-  if ($] < 5.017006) {
-    # since 5.17.6 the SvLEN stores RX_WRAPPED(rx)
-    $init->add(sprintf("SvCUR(&sv_list[$ix]) = %d;", $cur),
-               "SvLEN(&sv_list[$ix]) = 0;");
-  } else {
-    $init->add("sv_list[$ix].sv_u.svu_rx = (struct regexp*)sv_list[$ix].sv_any;");
-  }
-  $svsect->debug( $fullname, $sv->flagspv ) if $debug{flags};
+  $svsect->debug( $sv->flagspv ) if $debug{flags};
   $sym = savesym( $sv, sprintf( "&sv_list[%d]", $ix ) );
-  $sv->save_magic($fullname);
+  $sv->save_magic;
   return $sym;
-}
-
-sub save_remap {
-  my ($key, $pkg, $name, $ivx, $mandatory) = @_;
-  my $id = $xpvmgsect->index + 1;
-  #my $svid = $svsect->index + 1;
-  warn "init remap for $key\: $name in xpvmg_list[$id]\n" if $verbose;
-  my $props = { NAME => $name, ID   => $id, MANDATORY => $mandatory };
-  $init2_remap{$key}{MG} = [] unless $init2_remap{$key}{'MG'};
-  push @{$init2_remap{$key}{MG}}, $props;
-}
-
-sub patch_dlsym {
-  my ($sv, $fullname, $ivx) = @_;
-  my $pkg = '';
-  if (ref($sv) eq 'B::PVMG') {
-    my $stash = $sv->SvSTASH;
-    $pkg = $stash->can('NAME') ? $stash->NAME : '';
-  }
-  my $name = $sv->FLAGS & SVp_POK ? $sv->PVX : "";
-  my $ivxhex = sprintf("0x%x", $ivx);
-  # Encode RT #94221
-  if ($name =~ /encoding$/ and $name =~ /^(ascii|ascii_ctrl|iso8859_1|null)/ and $Encode::VERSION eq '2.58') {
-    $name =~ s/-/_/g;
-    $pkg = 'Encode' if $pkg eq 'Encode::XS'; # TODO foreign classes
-    mark_package($pkg) if $fullname eq '(unknown)' and $ITHREADS;
-    warn "$pkg $Encode::VERSION with remap support for $name\n" if $verbose;
-  }
-  elsif ($pkg eq 'Encode::XS') {
-    $pkg = 'Encode';
-    if ($fullname eq 'Encode::Encoding{iso-8859-1}') {
-      $name = "iso8859_1_encoding";
-    }
-    elsif ($fullname eq 'Encode::Encoding{null}') {
-      $name = "null_encoding";
-    }
-    elsif ($fullname eq 'Encode::Encoding{ascii-ctrl}') {
-      $name = "ascii_ctrl_encoding";
-    }
-    elsif ($fullname eq 'Encode::Encoding{ascii}') {
-      $name = "ascii_encoding";
-    }
-
-    if ($name and $name =~ /^(ascii|ascii_ctrl|iso8859_1|null)/ and $Encode::VERSION gt '2.58') {
-      my $enc = Encode::find_encoding($name);
-      $name .= "_encoding" unless $name =~ /_encoding$/;
-      $name =~ s/-/_/g;
-      warn "$pkg $Encode::VERSION with remap support for $name (find 1)\n" if $verbose;
-      mark_package($pkg);
-      if ($pkg ne 'Encode') {
-        svref_2object( \&{"$pkg\::bootstrap"} )->save;
-        mark_package('Encode');
-      }
-    }
-    else {
-      for my $n (Encode::encodings()) { # >=5.16 constsub without name
-        my $enc = Encode::find_encoding($n);
-        if ($enc and ref($enc) ne 'Encode::XS') { # resolve alias such as Encode::JP::JIS7=HASH(0x292a9d0)
-          $pkg = ref($enc);
-          $pkg =~ s/^(Encode::\w+)(::.*)/$1/; # collapse to the @dl_module name
-          $enc = Encode->find_alias($n);
-        }
-        if ($enc and ref($enc) eq 'Encode::XS' and $sv->IVX == $$enc) {
-          $name = $n;
-          $name =~ s/-/_/g;
-          $name .= "_encoding" if $name !~ /_encoding$/;
-          mark_package($pkg) ;
-          if ($pkg ne 'Encode') {
-            svref_2object( \&{"$pkg\::bootstrap"} )->save;
-            mark_package('Encode');
-          }
-          last;
-        }
-      }
-      if ($name) {
-        warn "$pkg $Encode::VERSION remap found for constant $name\n" if $verbose;
-      } else {
-        warn "Warning: Possible missing remap for compile-time XS symbol in $pkg $fullname $ivxhex [#305]\n";
-      }
-    }
-  }
-  # Encode-2.59 uses a different name without _encoding
-  elsif ($Encode::VERSION ge '2.58' and Encode::find_encoding($name)) {
-    my $enc = Encode::find_encoding($name);
-    $pkg = ref($enc) if ref($enc) ne 'Encode::XS';
-    $name .= "_encoding";
-    $name =~ s/-/_/g;
-    $pkg = 'Encode' unless $pkg;
-    warn "$pkg $Encode::VERSION with remap support for $name (find 2)\n" if $verbose;
-  }
-  # now that is a weak heuristic, which misses #305
-  elsif (defined ($Net::DNS::VERSION)
-         and $Net::DNS::VERSION =~ /^0\.(6[789]|7[1234])/) {
-    if ($fullname eq 'svop const') {
-      $name = "ascii_encoding";
-      $pkg = 'Encode' unless $pkg;
-      warn "Warning: Patch Net::DNS external XS symbol $pkg\::$name $ivxhex [RT #94069]\n";
-    }
-  }
-  elsif ($pkg eq 'Net::LibIDN') {
-    $name = "idn_to_ascii"; # ??
-  }
-
-  # new API (only Encode so far)
-  if ($pkg and $name and $name =~ /^[a-zA-Z_0-9-]+$/) { # valid symbol name
-    warn "Remap IOK|POK $pkg with $name\n" if $verbose;
-    save_remap($pkg, $pkg, $name, $ivx, 0);
-    $ivx = "0UL /* $ivxhex => $name */";
-    mark_package($pkg, 1) if $fullname =~ /^(svop const|padop)/;
-  }
-  else {
-    warn "Warning: Possible missing remap for compile-time XS symbol in $pkg $fullname $ivxhex [#305]\n";
-  }
-  return $ivx;
 }
 
 sub B::PVMG::save {
@@ -2738,50 +2155,46 @@ sub B::PVMG::save {
   if (defined $sym) {
     if ($in_endav) {
       warn "in_endav: static_free without $sym\n" if $debug{av};
-      @B::C::static_free = grep {!/$sym/} @B::C::static_free;
+      @static_free = grep {!/$sym/} @static_free;
     }
     return $sym;
   }
-  my ( $savesym, $cur, $len, $pv, $static ) = save_pv_or_rv($sv, $fullname);
-  if ($] > 5.017 and $static) { # 242: e.g. $1
-    $static = 0;
-    $len = $cur+1 unless $len;
-  }
+  # local $B::C::pv_copy_on_grow = 1 if $B::C::const_strings and $flags & SVf_READONLY;
+  my ( $savesym, $cur, $len, $pv ) = save_pv_or_rv($sv, $fullname);
+  $savesym = "(char*)$savesym";
+  my $shared_hek = $PERL510 ? (($sv->FLAGS & 0x09000000) == 0x09000000) : undef;
+  $len = 0 if $B::C::pv_copy_on_grow or $shared_hek;
   #warn sprintf( "PVMG %s (0x%x) $savesym, $len, $cur, $pv\n", $sym, $$sv ) if $debug{mg};
-
-  my ($ivx,$nvx);
-  # since 5.11 REGEXP isa PVMG, but has no IVX and NVX methods
-  if ($] >= 5.011 and ref($sv) eq 'B::REGEXP') {
-    return B::REGEXP::save($sv, $fullname);
-  }
-  else {
-    $ivx = ivx($sv->IVX); # XXX How to detect HEK* namehek?
-    $nvx = nvx($sv->NVX); # it cannot be xnv_u.xgv_stash ptr (BTW set by GvSTASH later)
-
-    # See #305 Encode::XS: XS objects are often stored as SvIV(SvRV(obj)). The real
-    # address needs to be patched after the XS object is initialized. But how detect them properly?
-    # Detect ptr to extern symbol in shared library and remap it in init2
-    # Safe and mandatory currently only Net-DNS-0.67 - 0.74.
-    # svop const or pad OBJECT,IOK
-    if (((!$ITHREADS
-          and $fullname
-          and $fullname =~ /^svop const|^padop|^Encode::Encoding| :pad\[1\]/)
-         or $ITHREADS)
-        and $sv->IVX > 0x400000 # some crazy heuristic for a sharedlibrary ptr in .data (> image_base)
-        and ref($sv->SvSTASH) ne 'B::SPECIAL')
-    {
-      $ivx = patch_dlsym($sv, $fullname, $ivx);
-    }
-  }
 
   if ($PERL510) {
     if ($sv->FLAGS & SVf_ROK) {  # sv => sv->RV cannot be initialized static.
-      $init->add(sprintf("SvRV_set(&sv_list[%d], (SV*)%s);", $svsect->index+1, $savesym))
-	if $savesym ne '';
-      $savesym = 'NULL';
-      $static = 1;
+      $init->add(sprintf("SvRV_set(&sv_list[%d], (SV*)%s);", $svsect->index+1, substr($savesym,7)))
+	if $savesym ne '(char*)';
+      $savesym = '0';
+    } else {
+      if ( $B::C::pv_copy_on_grow ) {
+        # comppadnames needs &PL_sv_undef instead of 0
+	# But threaded PL_sv_undef => my_perl->Isv_undef, and my_perl is not available static
+	if (!$pv or !$savesym or $savesym eq 'NULL') {
+	  if ($MULTI) {
+	    $savesym = "NULL";
+	    $init->add( sprintf( "sv_list[%d].sv_u.svu_pv = (char*)&PL_sv_undef;",
+				 $svsect->index+1 ) );
+	  } else {
+	    $savesym = '(char*)&PL_sv_undef';
+	  }
+	}
+      }
     }
-
+    my ($ivx,$nvx) = (0, "0");
+    # since 5.11 REGEXP isa PVMG, but has no IVX and NVX methods
+    if ($] >= 5.011 and ref($sv) eq 'B::REGEXP') {
+      return B::REGEXP::save($sv);
+    }
+    else {
+      $ivx = ivx($sv->IVX); # XXX How to detect HEK* namehek?
+      $nvx = nvx($sv->NVX); # it cannot be xnv_u.xgv_stash ptr (BTW set by GvSTASH later)
+    }
     if ($PERL514) {
       $xpvmgsect->comment("STASH, MAGIC, cur, len, xiv_u, xnv_u");
       $xpvmgsect->add(sprintf("Nullhv, {0}, %u, %u, {%s}, {%s}",
@@ -2792,31 +2205,54 @@ sub B::PVMG::save {
 			    $nvx, $cur, $len, $ivx));
     }
     $svsect->add(sprintf("&xpvmg_list[%d], %lu, 0x%x, {%s}",
-                         $xpvmgsect->index, $sv->REFCNT, $sv->FLAGS,
-			 $savesym eq 'NULL' ? '0' :
-                           ($C99?".svu_pv=(char*)":"(char*)").$savesym));
+                         $xpvmgsect->index, $sv->REFCNT, $sv->FLAGS, $savesym));
+    my $s = "sv_list[".$svsect->index."]";
+    if ($shared_hek) { # avoid free of static hek's
+      $free->add("    SvFAKE_off(&$s);");
+    } else {
+      push @static_free, $s if $len and $B::C::pv_copy_on_grow and !$in_endav;
+    }
   }
   else {
-    if ($savesym =~ /PL_sv_undef/ and $ITHREADS) {
-      $savesym = 'NULL'; # Moose 5.8.9d
+    # cannot initialize this pointer static
+    if ($savesym =~ /&(PL|sv)/) { # (char*)&PL_sv_undef | (char*)&sv_list[%d]
+      $xpvmgsect->add(sprintf("%d, %u, %u, %s, %s, 0, 0",
+			      0, $cur, $len, ivx($sv->IVX), nvx($sv->NVX)));
+      $init->add( sprintf( "xpvmg_list[%d].xpv_pv = $savesym;",
+			   $xpvmgsect->index ) );
+    } else {
+      $xpvmgsect->add(sprintf("%s, %u, %u, %s, %s, 0, 0",
+			      $savesym, $cur, $len, ivx($sv->IVX), nvx($sv->NVX)));
+      push @static_free, sprintf("sv_list[%d]", $svsect->index+1)
+	if $len and $B::C::pv_copy_on_grow and !$in_endav;
     }
-    $xpvmgsect->add(sprintf("(char*)%s, %u, %u, %s, %s, 0, 0",
-                            $savesym, $cur, $len, $ivx, $nvx));
     $svsect->add(sprintf("&xpvmg_list[%d], %lu, 0x%x",
 			 $xpvmgsect->index, $sv->REFCNT, $sv->FLAGS));
   }
-  $svsect->debug( $fullname, $sv->flagspv ) if $debug{flags};
-  my $s = "sv_list[".$svsect->index."]";
-  if ( !$static ) { # do not overwrite RV slot (#273)
-    # XXX comppadnames need &PL_sv_undef instead of 0 (?? which testcase?)
+  $svsect->debug( $sv->flagspv ) if $debug{flags};
+  if ( !$B::C::pv_copy_on_grow ) {
+    # comppadnames need &PL_sv_undef instead of 0
     if ($PERL510) {
-      $init->add( savepvn( "$s.sv_u.svu_pv", $pv, $sv, $cur ) );
+      if ($savesym) {
+	if (!$pv or $savesym eq 'NULL') {
+	  $init->add( sprintf( "sv_list[%d].sv_u.svu_pv = (char*)&PL_sv_undef;",
+			       $svsect->index ) );
+	} else {
+	  $init->add( savepvn( sprintf( "sv_list[%d].sv_u.svu_pv",
+					$svsect->index ), $pv, $sv ) );
+	}
+      }
     } else {
-      $init->add( savepvn( sprintf( "xpvmg_list[%d].xpv_pv", $xpvmgsect->index ),
-                          $pv, $sv, $cur ) );
+      if (!$pv or !$savesym or $savesym eq 'NULL') {
+        $init->add( sprintf( "xpvmg_list[%d].xpv_pv = (char*)&PL_sv_undef;",
+			     $xpvmgsect->index ) );
+      } else {
+        $init->add(savepvn( sprintf( "xpvmg_list[%d].xpv_pv", $xpvmgsect->index ),
+			    $pv ) );
+      }
     }
   }
-  $sym = savesym( $sv, "&".$s );
+  $sym = savesym( $sv, sprintf( "&sv_list[%d]", $svsect->index ) );
   $sv->save_magic($fullname);
   return $sym;
 }
@@ -2856,35 +2292,22 @@ sub B::PVMG::save_magic {
 		@{[(caller(1))[3]]}, @{[(caller(1))[2]]});
   }
 
-  # crashes on STASH=0x18 with HV PERL_MAGIC_overload_table stash %version:: flags=0x3280000c
-  # issue267 GetOpt::Long SVf_AMAGIC|SVs_RMG|SVf_OOK
-  # crashes with %Class::MOP::Instance:: flags=0x2280000c also
-  if (ref($sv) eq 'B::HV' and $] > 5.018 and $sv->MAGICAL and $fullname =~ /::$/) {
-    warn sprintf("skip SvSTASH for overloaded HV $fullname flags=0x%x\n", $sv->FLAGS)
-      if $verbose;
-  } else {
-    my $pkg = $sv->SvSTASH;
-    if ($$pkg) {
-      warn sprintf("stash isa class(\"%s\") 0x%x\n", $pkg->NAME, $$pkg)
-        if $debug{mg} or $debug{gv};
-      # 361 do not force dynaloading IO via IO::Handle upon us
-      # core already initialized this stash for us
-      unless ($fullname eq 'main::STDOUT' and $] >= 5.018) {
-        $pkg->save($fullname) ;
+  my $pkg = $sv->SvSTASH;
+  if ($$pkg) {
+    warn sprintf("stash isa class(\"%s\") 0x%x\n", $pkg->NAME, $$pkg)
+      if $debug{mg} or $debug{gv};
 
-        no strict 'refs';
-        warn sprintf( "xmg_stash = \"%s\" (0x%x)\n", $pkg->NAME, $$pkg )
-          if $debug{mg} or $debug{gv};
-        # Q: Who is initializing our stash from XS? ->save is missing that.
-        # A: We only need to init it when we need a CV
-        # defer for XS loaded stashes with AMT magic
-        $init->add( sprintf( "SvSTASH_set(s\\_%x, (HV*)s\\_%x);", $$sv, $$pkg ) );
-        $init->add( sprintf( "SvREFCNT((SV*)s\\_%x) += 1;", $$pkg ) );
-        $init->add("++PL_sv_objcount;") unless ref($sv) eq "B::IO";
-        # XXX
-        #push_package($pkg->NAME);  # correct code, but adds lots of new stashes
-      }
-    }
+    $pkg->save($fullname);
+
+    no strict 'refs';
+    warn sprintf( "xmg_stash = \"%s\" (0x%x)\n", $pkg->NAME, $$pkg )
+      if $debug{mg} or $debug{gv};
+    # Q: Who is initializing our stash from XS? ->save is missing that.
+    # A: We only need to init it when we need a CV
+    $init->add( sprintf( "SvSTASH_set(s\\_%x, s\\_%x);", $$sv, $$pkg ) );
+    $init->add( sprintf( "SvREFCNT((SV*)s\\_%x) += 1;", $$pkg ) );
+    # XXX
+    #push_package($pkg->NAME);  # correct code, but adds lots of new stashes
   }
   # Protect our SVs against non-magic or SvPAD_OUR. Fixes tests 16 and 14 + 23
   if ($PERL510 and !$sv->MAGICAL) {
@@ -2893,8 +2316,6 @@ sub B::PVMG::save_magic {
       if $debug{mg};
     return '';
   }
-  $init->add(sprintf("SvREADONLY_off((SV*)s\\_%x);", $$sv)) if $sv_flags & SVf_READONLY;
-
   my @mgchain = $sv->MAGIC;
   my ( $mg, $type, $obj, $ptr, $len, $ptrsv );
   my $magic = '';
@@ -2904,7 +2325,7 @@ sub B::PVMG::save_magic {
     $len  = $mg->LENGTH;
     $magic .= $type;
     if ( $debug{mg} ) {
-      warn sprintf( "%s %s magic\n", $fullname, cchar($type) );
+      warn sprintf( "%s magic\n", cchar($type) );
       #eval {
       #  warn sprintf( "magic %s (0x%x), obj %s (0x%x), type %s, ptr %s\n",
       #                class($sv), $$sv, class($obj), $$obj, cchar($type),
@@ -2927,14 +2348,16 @@ sub B::PVMG::save_magic {
       # XXX On 5.6 ptr might be a SCALAR ref to the PV, which was fixed later
       if (ref($ptr) eq 'SCALAR') {
 	$ptrsv = svref_2object($ptr)->save($fullname);
-      } elsif ($ptr and ref $ptr) {
-	$ptrsv = $ptr->save($fullname);
       } else {
-	$ptrsv = 'NULL';
+	$ptrsv = $ptr->save($fullname);
       }
       warn "MG->PTR is an SV*\n" if $debug{mg};
-      $init->add(sprintf("sv_magic((SV*)s\\_%x, (SV*)s\\_%x, %s, (char *)%s, %d);",
-                         $$sv, $$obj, cchar($type), $ptrsv, $len));
+      $init->add(
+        sprintf(
+          "sv_magic((SV*)s\\_%x, (SV*)s\\_%x, %s, (char *)%s, %d);",
+          $$sv, $$obj, cchar($type), $ptrsv, $len
+        )
+      );
     }
     # coverage $Template::Stash::PRIVATE
     elsif ( $type eq 'r' ) { # qr magic, for 5.6 done in C.xs. test 20
@@ -2953,7 +2376,7 @@ sub B::PVMG::save_magic {
 	}
 	my $pmsym = $pmop->save($fullname);
 	if ($PERL510) {
-          push @B::C::static_free, $resym;
+          push @static_free, $resym;
 	  $init->add( split /\n/,
 		    sprintf <<CODE1, $pmop->pmflags, $$sv, cchar($type), cstring($ptr), $len );
 {
@@ -2974,10 +2397,12 @@ CODE2
         }
       }
     }
-    elsif ( $type eq 'D' ) { # XXX regdata AV - coverage? i95, 903
-      # see Perl_mg_copy() in mg.c
-      $init->add(sprintf("sv_magic((SV*)s\\_%x, (SV*)s\\_%x, %s, %s, %d);",
-                         $$sv, $fullname eq 'main::-' ? 0 : $$sv, "'D'", cstring($ptr), $len ));
+    elsif ( $type eq 'D' ) { # XXX regdata AV - coverage? i95
+      if ($mg->OBJ and !($sv_flags & SVf_READONLY)) {
+	# see Perl_mg_copy() in mg.c
+	$init->add(sprintf("sv_magic((SV*)s\\_%x, (SV*)s\\_%x, %s, %s, %d);",
+			   $$sv, $$sv, "'D'", cstring($ptr), $len ));
+      }
     }
     elsif ( $type eq 'n' ) { # shared_scalar is from XS dist/threads-shared
       # XXX check if threads is loaded also? otherwise it is only stubbed
@@ -2990,27 +2415,14 @@ CODE2
           "/* AMT overload table for the stash s\\_%x is generated dynamically */",
           $$sv ));
     }
-    elsif ( $type eq ':' ) { # symtab magic
-      # search $ptr in list of pmops and replace it. e.g. (char*)&pmop_list[0]
-      my $pmop_ptr = unpack("J", $mg->PTR);
-      my $pmop = $Regexp{$pmop_ptr};
-      warn sprintf("pmop 0x%x not found in our B::C Regexp hash", $pmop_ptr)
-        unless $pmop;
-      my $pmsym = $pmop ? $pmop->save($fullname) : '&pmop_list[0]';
-      $init->add("{\tU32 elements;", # toke.c: PL_multi_open == '?'
-                 sprintf("\tMAGIC *mg = sv_magicext((SV*)s\\_%x, 0, ':', 0, 0, 0);", $$sv),
-                 "\telements = mg->mg_len / sizeof(PMOP**);",
-                 "\tRenewc(mg->mg_ptr, elements + 1, PMOP*, char);",
-                 sprintf("\t((OP**)mg->mg_ptr) [elements++] = %s;", $pmsym),
-                 "\tmg->mg_len = elements * sizeof(PMOP**);", "}");
-    }
     else {
       $init->add(sprintf(
           "sv_magic((SV*)s\\_%x, (SV*)s\\_%x, %s, %s, %d);",
-          $$sv, $$obj, cchar($type), cstring($ptr), $len))
+          $$sv, $$obj, cchar($type), cstring($ptr), $len
+        )
+      )
     }
   }
-  $init->add(sprintf("SvREADONLY_on((SV*)s\\_%x);", $$sv)) if $sv_flags & SVf_READONLY;
   $magic;
 }
 
@@ -3022,17 +2434,15 @@ sub B::RV::save {
   warn sprintf( "Saving RV %s (0x%x) - called from %s:%s\n",
 		class($sv), $$sv, @{[(caller(1))[3]]}, @{[(caller(1))[2]]})
     if $debug{sv};
-
   my $rv = save_rv($sv, $fullname);
   return '0' unless $rv;
   if ($PERL510) {
     # 5.10 has no struct xrv anymore, just sv_u.svu_rv. static or dynamic?
     # initializer element is computable at load time
     $svsect->add( sprintf( "ptr_undef, %lu, 0x%x, {0}", $sv->REFCNT, $sv->FLAGS ) );
-    $svsect->debug( $fullname, $sv->flagspv ) if $debug{flags};
-    my $s = "sv_list[".$svsect->index."]";
-    $init->add( "$s.sv_u.svu_rv = (SV*)$rv;" );
-    return savesym( $sv, "&".$s );
+    $svsect->debug( $sv->flagspv ) if $debug{flags};
+    $init->add( sprintf( "sv_list[%d].sv_u.svu_rv = (SV*)%s;", $svsect->index, $rv ) );
+    return savesym( $sv, sprintf( "&sv_list[%d]", $svsect->index ) );
   }
   else {
     # GVs need to be handled at runtime
@@ -3048,7 +2458,7 @@ sub B::RV::save {
         sprintf( "xrv_list[%d].xrv_rv = (SV*)%s;", $xrvsect->index, $rv ) );
     }
     # one more: bootstrapped XS CVs (test Class::MOP, no simple testcase yet)
-    elsif ( $rv =~ /(\(char\*\))?get_cv\(/ ) {
+    elsif ( $rv =~ /get_cv\(/ ) {
       $xrvsect->add("(SV*)Nullsv");
       $init->add(
         sprintf( "xrv_list[%d].xrv_rv = (SV*)%s;", $xrvsect->index, $rv ) );
@@ -3061,24 +2471,14 @@ sub B::RV::save {
     }
     $svsect->add(sprintf("&xrv_list[%d], %lu, 0x%x",
 			 $xrvsect->index, $sv->REFCNT, $sv->FLAGS));
-    $svsect->debug( $fullname, $sv->flagspv ) if $debug{flags};
-    my $s = "sv_list[".$svsect->index."]";
-    return savesym( $sv, "&".$s );
+    $svsect->debug( $sv->flagspv ) if $debug{flags};
+    return savesym( $sv, sprintf( "&sv_list[%d]", $svsect->index ) );
   }
 }
 
 sub get_isa ($) {
   no strict 'refs';
-  if ($PERL510) {
-    return @{mro::get_linear_isa($_[0])};
-  } else {
-    my $s = $_[0].'::';
-    if (exists(${$s}{ISA})) {
-      if (exists(${$s}{ISA}{ARRAY})) {
-	return @{ $s . '::ISA' };
-      }
-    }
-  }
+  return $PERL510 ? @{mro::get_linear_isa($_[0])} : @{ $_[0] . '::ISA' };
 }
 
 # try_isa($pkg,$name) returns the found $pkg for the method $pkg::$name
@@ -3086,7 +2486,6 @@ sub get_isa ($) {
 # XXX issue 64, empty @ISA if a package has no subs. in Bytecode ok
 sub try_isa {
   my ( $cvstashname, $cvname ) = @_;
-  return 0 unless defined $cvstashname;
   if (my $found = $isa_cache{"$cvstashname\::$cvname"}) {
     return $found;
   }
@@ -3101,9 +2500,7 @@ sub try_isa {
     next if $_ eq $cvstashname;
     warn sprintf( "Try &%s::%s\n", $_, $cvname ) if $debug{cv};
     if (defined(&{$_ .'::'. $cvname})) {
-      if (exists(${$cvstashname.'::'}{ISA})) {
-        svref_2object( \@{$cvstashname . '::ISA'} )->save("$cvstashname\::ISA");
-      }
+      svref_2object( \@{$cvstashname . '::ISA'} )->save("$cvstashname\::ISA");
       $isa_cache{"$cvstashname\::$cvname"} = $_;
       mark_package($_, 1); # force
       return $_;
@@ -3114,15 +2511,11 @@ sub try_isa {
 	if ($parent) {
 	  $isa_cache{"$_\::$cvname"} = $parent;
 	  $isa_cache{"$cvstashname\::$cvname"} = $parent;
-	  warn sprintf( "Found &%s::%s\n", $parent, $cvname ) if $debug{gv};
-	  if (exists(${$parent.'::'}{ISA})) {
-	    warn "save \@$parent\::ISA\n" if $debug{pkg};
-	    svref_2object( \@{$parent . '::ISA'} )->save("$parent\::ISA");
-          }
-	  if (exists(${$_.'::'}{ISA})) {
-            warn "save \@$_\::ISA\n" if $debug{pkg};
-	    svref_2object( \@{$_ . '::ISA'} )->save("$_\::ISA");
-          }
+	  warn sprintf( "Found &%s::%s\n", $parent, $cvname ) if $debug{meth};
+	  warn "save \@$parent\::ISA\n" if $debug{pkg};
+	  svref_2object( \@{$parent . '::ISA'} )->save("$parent\::ISA");
+	  warn "save \@$_\::ISA\n" if $debug{pkg};
+	  svref_2object( \@{$_ . '::ISA'} )->save("$_\::ISA");
 	  return $parent;
 	}
       }
@@ -3154,13 +2547,13 @@ sub try_autoload {
   }
   if ($fullname eq 'utf8::SWASHNEW') {
     # utf8_heavy was loaded so far, so defer to a demand-loading stub
-    my $stub = sub { require 'utf8_heavy.pl' unless $savINC{"utf8_heavy.pl"}; goto &utf8::SWASHNEW; };
+    my $stub = sub { require 'utf8_heavy.pl' unless $INC{"utf8_heavy.pl"}; goto &utf8::SWASHNEW; };
     return svref_2object( $stub );
   }
 
   # Handle AutoLoader classes. Any more general AUTOLOAD
   # use should be handled by the class itself.
-  my @isa = get_isa($cvstashname);
+  my @isa = $PERL510 ? @{mro::get_linear_isa($cvstashname)} : @{ $cvstashname . '::ISA' };
   if ( $cvstashname =~ /^POSIX|Storable|DynaLoader|Net::SSLeay|Class::MethodMaker$/
     or (exists ${$cvstashname.'::'}{AUTOLOAD} and grep( $_ eq "AutoLoader", @isa ) ) )
   {
@@ -3207,18 +2600,11 @@ sub try_autoload {
 
   # XXX TODO Check Selfloader (test 31?)
   svref_2object( \*{$cvstashname.'::AUTOLOAD'} )->save
-    if $cvstashname and exists ${$cvstashname.'::'}{AUTOLOAD};
+    if $cvstashname and exists ${"$cvstashname\::"}{AUTOLOAD};
   svref_2object( \*{$cvstashname.'::CLONE'} )->save
     if $cvstashname and exists ${$cvstashname.'::'}{CLONE};
 }
 sub Dummy_initxs { }
-
-sub B::CV::is_lexsub {
-  my ($cv, $gv) = @_;
-  # logical shortcut perl5 bug since ~ 5.19: testcc.sh 42
-  # return ($PERL518 and (!$gv or ref($gv) eq 'B::SPECIAL') and $cv->can('NAME_HEK'));
-  return ($PERL518 and (!$gv or ref($gv) eq 'B::SPECIAL') and $cv->can('NAME_HEK')) ? 1 : 0;
-}
 
 sub B::CV::save {
   my ($cv) = @_;
@@ -3229,27 +2615,20 @@ sub B::CV::save {
   }
   my $gv = $cv->GV;
   my ( $cvname, $cvstashname, $fullname );
-  my $CvFLAGS = $cv->CvFLAGS;
   if ($gv and $$gv) {
     $cvstashname = $gv->STASH->NAME;
     $cvname      = $gv->NAME;
     $fullname    = $cvstashname.'::'.$cvname;
     warn sprintf( "CV 0x%x as PVGV 0x%x %s CvFLAGS=0x%x\n",
-                  $$cv, $$gv, $fullname, $CvFLAGS )
+                  $$cv, $$gv, $fullname, $cv->CvFLAGS )
       if $debug{cv};
     # XXX not needed, we already loaded utf8_heavy
     #return if $fullname eq 'utf8::AUTOLOAD';
-    return '0' if $all_bc_subs{$fullname} or skip_pkg($cvstashname);
-    $CvFLAGS &= ~0x400 if $PERL514; # no CVf_CVGV_RC otherwise we cannot set the GV
+    return '0' if $all_bc_subs{$fullname} or $skip_package{$cvstashname};
     mark_package($cvstashname, 1) unless $include_package{$cvstashname};
   }
-  elsif ($cv->is_lexsub($gv)) {
+  elsif ((!$gv or ref($gv) eq 'B::SPECIAL') and $cv->can('NAME_HEK')) {
     $fullname = $cv->NAME_HEK;
-    warn sprintf( "CV NAME_HEK $fullname\n") if $debug{cv};
-    if ($fullname =~ /^(.*)::(.*?)$/) {
-      $cvstashname = $1;
-      $cvname      = $2;
-    }
   }
 
   # XXX TODO need to save the gv stash::AUTOLOAD if exists
@@ -3257,7 +2636,7 @@ sub B::CV::save {
   my $cvxsub  = $cv->XSUB;
   my $isconst;
   { no strict 'subs';
-    $isconst = $PERL56 ? 0 : $CvFLAGS & CVf_CONST;
+    $isconst = $PERL56 ? 0 : $cv->CvFLAGS & CVf_CONST;
   }
 
   if ( !$isconst && $cvxsub && ( $cvname ne "INIT" ) ) {
@@ -3295,13 +2674,10 @@ sub B::CV::save {
 	  }
 	}
 	$xsub{$stashname} = 'Dynamic-'.$file;
-        force_saving_xsloader();
+        $use_xsloader = 1;
       }
       else {
         $xsub{$stashname} = 'Dynamic';
-        # DynaLoader was for sure loaded, before so we execute the branch which
-        # does walk_syms and add_hashINC
-        mark_package('DynaLoader', 1);
       }
 
       # INIT is removed from the symbol table, so this call must come
@@ -3333,11 +2709,49 @@ sub B::CV::save {
       svref_2object( \*{"$stashname\::bootstrap"} )->save
         if $stashname;# and defined ${"$stashname\::bootstrap"};
       # delsym($cv);
-      return qq/get_cv("$fullname", 0)/;
-    } else {  # Those cvs are already booted. Reuse their GP.
-      # Esp. on windows it is impossible to get at the XS function ptr
-      warn sprintf( "core XSUB $fullname CV 0x%x\n", $$cv ) if $debug{cv};
-      return qq/get_cv("$fullname", 0)/;
+      return qq/get_cv("$fullname", TRUE)/;
+    } else {
+      my $xsstash = $stashname;
+      $xsstash =~ s/::/_/g;
+      my $xs = "XS_${xsstash}_${cvname}";
+      if ($stashname eq 'version') { # exceptions see universal.c:struct xsub_details details[]
+        my %vtrans = (
+                      'parse' => 'new',
+                      '(""'   => 'stringify',
+                      '(0+'   => 'numify',
+                      '(cmp'  => 'vcmp',
+                      '(<=>'  => 'vcmp',
+                      '(bool' => 'boolean',
+                      'declare'   => 'qv',
+                     );
+        if ($vtrans{$cvname}) {
+          $xs = "XS_version_".$vtrans{$cvname};
+        } elsif ($cvname =~ /^\(/ ) {
+          $xs = "XS_version_noop";
+	}
+      }
+      elsif ($fullname eq 'Internals::hv_clear_placeholders') {
+	$xs = 'XS_Internals_hv_clear_placehold';
+      }
+      elsif ($fullname eq 'Tie::Hash::NamedCapture::FIRSTKEY') {
+	$xs = 'XS_Tie_Hash_NamedCapture_FIRSTK';
+      }
+      elsif ($fullname eq 'Tie::Hash::NamedCapture::NEXTKEY') {
+	$xs = 'XS_Tie_Hash_NamedCapture_NEXTK';
+      }
+      warn sprintf( "core XSUB $xs CV 0x%x\n", $$cv )
+    	if $debug{cv};
+      if (!$ENV{DL_NOWARN} and $stashname eq 'DynaLoader' and $] >= 5.015002 and $] < 5.015004) {
+	# [perl #100138] DynaLoader symbols are XS_INTERNAL since 5.15.2 (16,29,44,45).
+	# Not die because the patched libperl is hard to detect (nm libperl|egrep "_XS_Dyna.* t "),
+	# and we want to allow a patched libperl.
+	warn "Warning: DynaLoader broken with 5.15.2-5.15.3.\n".
+	  "  Use 0001-Export-DynaLoader-symbols-from-libperl-again.patch in [perl #100138]"
+	    unless $B::C::DynaLoader_warn;
+	$B::C::DynaLoader_warn++;
+      }
+      $decl->add("XS($xs);");
+      return qq/newXS("$fullname", $xs, (char*)xsfile)/;
     }
   }
   if ( $cvxsub && $cvname eq "INIT" ) {
@@ -3346,24 +2760,14 @@ sub B::CV::save {
     return svref_2object( \&Dummy_initxs )->save;
   }
 
-  if ($isconst and !($CvFLAGS & CVf_ANON)) { # XXX how is ANON with CONST handled? CONST uses XSUBANY
+  if ($isconst and !($cv->CvFLAGS & CVf_ANON)) {
     my $stash = $gv->STASH;
     warn sprintf( "CV CONST 0x%x %s::%s\n", $$gv, $cvstashname, $cvname )
       if $debug{cv};
     # warn sprintf( "%s::%s\n", $cvstashname, $cvname) if $debug{sub};
     my $stsym = $stash->save;
     my $name  = cstring($cvname);
-    my $sv  = $cv->XSUBANY;
-    if ($] >= 5.016) { # need to check 'Encode::XS' constant encodings
-      # warn "$sv CONSTSUB $name";
-      if ((ref($sv) eq 'B::IV' or ref($sv) eq 'B::PVMG') and $sv->FLAGS & SVf_ROK) {
-        my $rv = $sv->RV;
-        if ($rv->FLAGS & (SVp_POK|SVf_IOK) and $rv->IVX > 0x400000) {
-          patch_dlsym($rv, $fullname, $rv->IVX);
-        }
-      }
-    }
-    my $vsym  = $sv->save;
+    my $vsym  = $cv->XSUBANY->save;
     my $cvi = "cv".$cv_index;
     $decl->add("Static CV* $cvi;");
     $init->add("$cvi = newCONSTSUB( $stsym, $name, (SV*)$vsym );");
@@ -3381,7 +2785,6 @@ sub B::CV::save {
     $sym = savesym( $cv, "CVIX$sv_ix" );
   } else {
     $svsect->add("CVIX$sv_ix");
-    $svsect->debug( "&".$fullname, $cv->flagspv ) if $debug{flags};
     $xpvcv_ix = $xpvcvsect->index + 1;
     $xpvcvsect->add("XPVCVIX$xpvcv_ix");
     # Save symbol now so that GvCV() doesn't recurse back to us via CvGV()
@@ -3395,45 +2798,10 @@ sub B::CV::save {
     push_package($package_pv);
   }
   if ($fullname eq 'utf8::SWASHNEW') { # bypass utf8::AUTOLOAD, a new 5.13.9 mess
-    require "utf8_heavy.pl" unless $savINC{"utf8_heavy.pl"};
+    require "utf8_heavy.pl" unless $INC{"utf8_heavy.pl"};
     # sub utf8::AUTOLOAD {}; # How to ignore &utf8::AUTOLOAD with Carp? The symbol table is
-    # already polluted. See issue 61 and force_heavy()
+    # already polluted. See issue 61.
     svref_2object( \&{"utf8\::SWASHNEW"} )->save;
-  }
-
-  if ($fullname eq 'IO::Socket::SSL::SSL_Context::new') {
-    if ($IO::Socket::SSL::VERSION ge '1.956' and $IO::Socket::SSL::VERSION lt '1.995') {
-      # See https://code.google.com/p/perl-compiler/issues/detail?id=317
-      # https://rt.cpan.org/Ticket/Display.html?id=95452
-      warn "Warning: Your IO::Socket::SSL version $IO::Socket::SSL::VERSION is unsupported to create\n".
-           "  a server. You need to upgrade IO::Socket::SSL to at least 1.995 [CPAN #95452]\n";
-    }
-  }
-
-  if (!$$root && !$cvxsub) {
-    my $reloaded;
-    if ($cvstashname =~ /^(bytes|utf8)$/) { # no autoload, force compile-time
-      force_heavy($cvstashname);
-      $cv = svref_2object( \&{"$cvstashname\::$cvname"} );
-      $reloaded = 1;
-    } elsif ($fullname eq 'Coro::State::_jit') { # 293
-      # need to force reload the jit src
-      my ($pl) = grep { m|^Coro/jit-| } keys %INC;
-      if ($pl) {
-        delete $INC{$pl};
-        require $pl;
-        $cv = svref_2object( \&{$fullname} );
-        $reloaded = 1;
-      }
-    }
-    if ($reloaded) {
-      $gv = $cv->GV;
-      warn sprintf( "Redefined CV 0x%x as PVGV 0x%x %s CvFLAGS=0x%x\n",
-                    $$cv, $$gv, $fullname, $CvFLAGS ) if $debug{cv};
-      $sym = savesym( $cv, $sym );
-      $root    = $cv->ROOT;
-      $cvxsub  = $cv->XSUB;
-    }
   }
   if ( !$$root && !$cvxsub ) {
     if ( my $auto = try_autoload( $cvstashname, $cvname ) ) {
@@ -3464,7 +2832,7 @@ sub B::CV::save {
 		$init->add("$oldsym = $newsym;");
 		delsym($gv);
 	      }# else {
-		#$init->add("GvCV_set(gv_fetchpv(\"$fullname\", GV_ADD, SVt_PV), (CV*)NULL);");
+		#$init->add("GvCV_set(gv_fetchpv(\"$fullname\", TRUE, SVt_PV), (CV*)NULL);");
 	      #}
 	      return $cvsym;
 	    }
@@ -3494,44 +2862,30 @@ sub B::CV::save {
     }
   }
   if (!$$root) {
-    if ($fullname ne 'threads::tid'
-        and $fullname ne 'main::main::'
-        and ($PERL510 and !defined(&{"$cvstashname\::AUTOLOAD"})))
-    {
-      # XXX What was here?
+    if ($fullname ne 'threads::tid' and ($PERL510 and !defined(&{"$cvstashname\::AUTOLOAD"}))) {
+      warn "Warning: &".$fullname." not found\n" if $verbose or $debug{sub};
     }
-    if (exists &$fullname) {
-      warn "Warning: Empty &".$fullname."\n" if $debug{sub};
-      $init->add( "/* empty CV $fullname */" ) if $verbose or $debug{sub};
-    } elsif ($cv->is_lexsub($gv)) {
-      # need to find the attached lexical sub (#130 + #341) at run-time
-      # in the PadNAMES array. So keep the empty PVCV
-      warn "lexsub &".$fullname." saved as empty $sym\n" if $debug{sub};
+    $init->add( "/* CV $fullname not found */" ) if $verbose or $debug{sub};
+    # This block broke test 15, disabled
+    if (0 and $sv_ix == $svsect->index and !$new_cv_fw) { # can delete, is the last SV
+      warn "No definition for sub $fullname (unable to autoload), skip CV[$sv_ix]\n"
+	if $debug{cv};
+      $svsect->remove;
+      $xpvcvsect->remove;
+      delsym( $cv );
+      # Empty CV (methods) must be skipped not to disturb method resolution
+      # (e.g. t/testm.sh POSIX)
+      return '0';
     } else {
-      warn "Warning: &".$fullname." not found\n" if $debug{sub};
-      $init->add( "/* CV $fullname not found */" ) if $verbose or $debug{sub};
-      # This block broke test 15, disabled
-      if ($sv_ix == $svsect->index and !$new_cv_fw) { # can delete, is the last SV
-        warn "No definition for sub $fullname (unable to autoload), skip CV[$sv_ix]\n"
-          if $debug{cv};
-        $svsect->remove;
-        $xpvcvsect->remove;
-        delsym( $cv );
-        # Empty CV (methods) must be skipped not to disturb method resolution
-        # (e.g. t/testm.sh POSIX)
-        return '0';
-      } else {
-        # interim &AUTOLOAD saved, cannot delete. e.g. Fcntl, POSIX
-        warn "No definition for sub $fullname (unable to autoload), stub CV[$sv_ix]\n"
-          if $debug{cv} or $verbose;
-        # continue, must save the 2 symbols from above
-      }
+      # interim &AUTOLOAD saved, cannot delete. e.g. Fcntl, POSIX
+      warn "No definition for sub $fullname (unable to autoload), stub CV[$sv_ix]\n"
+	if $debug{cv} or $verbose;
+      # continue, must save the 2 symbols from above
     }
   }
 
   my $startfield = 0;
   my $padlist    = $cv->PADLIST;
-  $B::C::curcv = $cv;
   my $padlistsym = 'NULL';
   my $pv         = $cv->PV;
   my $xsub       = 0;
@@ -3541,10 +2895,10 @@ sub B::CV::save {
                   $$cv, $$root )
       if $debug{cv} and $debug{gv};
     my $ppname = "";
-    if ($cv->is_lexsub($gv)) {
-      my $name = $cv->can('NAME_HEK') ? $cv->NAME_HEK : "anonlex";
-      $ppname = "pp_lexsub_".$name;
-      $fullname = "<lex>".$name;
+    if ((!$gv or ref($gv) eq 'B::SPECIAL') and $cv->can('NAME_HEK')) {
+      my $gvname    = $cv->NAME_HEK;
+      $ppname = "pp_lexsub_";
+      $fullname = "<lex>".$gvname;
     }
     elsif ($gv and $$gv) {
       my ($stashname, $gvname);
@@ -3572,7 +2926,7 @@ sub B::CV::save {
     #  if $debug{cv};
     # XXX missing cv_start for AUTOLOAD on 5.8
     $startfield = objsym($root->next) unless $startfield; # 5.8 autoload has only root
-    $startfield = "0" unless $startfield; # XXX either CONST ANON or empty body
+    $startfield = "0" unless $startfield;
     if ($$padlist) {
       # XXX readonly comppad names and symbols invalid
       #local $B::C::pv_copy_on_grow = 1 if $B::C::ro_inc;
@@ -3584,43 +2938,20 @@ sub B::CV::save {
 		    $padlistsym, $$padlist, $$cv )
         if $debug{cv} and $debug{gv};
       # do not record a forward for the pad only
-
-      # issue 298: dynamic CvPADLIST(&END) since 5.18 - END{} blocks
-      # and #169 and #304 Attribute::Handlers
-      if ($] > 5.017 and ($B::C::dyn_padlist or $fullname =~ /^(main::END|Attribute::Handlers)/)) {
-        $init->add("{ /* &$fullname needs a dynamic padlist */",
-                   "  PADLIST *pad;",
-                   "  Newxz(pad, sizeof(PADLIST), PADLIST);",
-                   "  Copy($padlistsym, pad, sizeof(PADLIST), char);",
-                   "  CvPADLIST($sym) = pad;",
-                   "}");
-      } else {
-        $init->add( "CvPADLIST($sym) = $padlistsym;" );
-      }
+      $init->add( "CvPADLIST($sym) = $padlistsym;" );
     }
     warn $fullname."\n" if $debug{sub};
   }
-  elsif ($cv->is_lexsub($gv)) {
-    ;
-  }
-  elsif (!exists &$fullname) {
+  else {
     warn $fullname." not found\n" if $debug{sub};
     warn "No definition for sub $fullname (unable to autoload)\n"
       if $debug{cv};
     $init->add( "/* $fullname not found */" ) if $verbose or $debug{sub};
-    # XXX empty CV should not be saved. #159, #235
+    # XXX empty CV should not be saved
     # $svsect->remove( $sv_ix );
     # $xpvcvsect->remove( $xpvcv_ix );
     # delsym( $cv );
-    if (!$new_cv_fw) {
-      $symsect->add("XPVCVIX$xpvcv_ix\t0");
-    }
-    $CvFLAGS &= ~0x1000 if $PERL514; # CVf_DYNFILE
-    $CvFLAGS &= ~0x400 if $gv and $$gv and $PERL514; #CVf_CVGV_RC
-    $symsect->add(sprintf(
-      "CVIX%d\t(XPVCV*)&xpvcv_list[%u], %lu, 0x%x".($PERL510?", {0}":''),
-      $sv_ix, $xpvcv_ix, $cv->REFCNT, $CvFLAGS));
-    return qq/get_cv("$fullname", 0)/;
+    # return '0';
   }
 
   # Now it is time to record the CV
@@ -3634,17 +2965,9 @@ sub B::CV::save {
     $sym = savesym( $cv, "&sv_list[$sv_ix]" );
   }
 
-  # $pv = '' unless defined $pv;    # Avoid use of undef warnings
-  #warn sprintf( "CV prototype %s for CV 0x%x\n", cstring($pv), $$cv )
-  #  if $pv and $debug{cv};
-  my $proto = defined $pv ? cstring($pv) : 'NULL';
-  my $pvsym = 'NULL';
-  my $cur = defined $pv ? $cv->CUR : 0;
-  my $len = $cur + 1;
-  $len++ if IsCOW($cv);
-  $len = 0 if $B::C::const_strings;
-  # need to survive cv_undef as there is no protection against static CVs
-  my $refcnt = $cv->REFCNT + ($PERL510 ? 1 : 0);
+  $pv = '' unless defined $pv;    # Avoid use of undef warnings
+  my ( $pvsym, $cur, $len ) = ('NULL',0,0);
+  my $CvFLAGS = $cv->CvFLAGS;
   # GV cannot be initialized statically
   my $xcv_outside = ${ $cv->OUTSIDE };
   if ($xcv_outside == ${ main_cv() } and !$MULTI) {
@@ -3656,16 +2979,18 @@ sub B::CV::save {
     $xcv_outside = 0; # just a placeholder for a run-time GV
   }
   if ($PERL510) {
-    $pvsym = save_hek($pv);
+    ( $pvsym, $cur ) = save_hek($pv);
     # XXX issue 84: we need to check the cv->PV ptr not the value.
     # "" is different to NULL for prototypes
-    $len = $cur ? $cur+1 : 0;
+    if ($cur) {
+      $len = $B::C::pv_copy_on_grow ? 0 : $cur+1;
+    }
     # TODO:
     # my $ourstash = "0";  # TODO stash name to bless it (test 16: "main::")
     if ($PERL514) {
       # cv_undef wants to free it when CvDYNFILE(cv) is true.
       # E.g. DateTime: boot_POSIX. newXS reuses cv if autoloaded. So turn it off globally.
-      $CvFLAGS &= ~0x1000; # CVf_DYNFILE off
+      my $CvFLAGS = $cv->CvFLAGS & ~0x1000; # CVf_DYNFILE
       my $xpvc = sprintf
 	# stash magic cur len cvstash start root cvgv cvfile cvpadlist     outside outside_seq cvflags cvdepth
 	("Nullhv, {0}, %u, %u, %s, {%s}, {s\\_%x}, %s, %s, %s, (CV*)%s, %s, 0x%x, %d",
@@ -3676,7 +3001,7 @@ sub B::CV::save {
 	 $padlistsym,
 	 $xcv_outside, #if main_cv set later
 	 ivx($cv->OUTSIDE_SEQ),
-	 $CvFLAGS,
+	 ($gv and $$gv and $CvFLAGS & 0x400) ? 0 : $CvFLAGS, # no CVf_CVGV_RC otherwise we cannot set the GV
 	 $cv->DEPTH);
       # repro only with 5.15.* threaded -q (70c0620) Encode::Alias::define_alias
       warn "lexwarnsym in XPVCV OUTSIDE: $xpvc" if $xpvc =~ /, \(CV\*\)iv\d/; # t/testc.sh -q -O3 227
@@ -3684,26 +3009,29 @@ sub B::CV::save {
 	$symsect->add("XPVCVIX$xpvcv_ix\t$xpvc");
 	#$symsect->add
 	#  (sprintf("CVIX%d\t(XPVCV*)&xpvcv_list[%u], %lu, 0x%x, {0}"),
-	#	   $sv_ix, $xpvcv_ix, $cv->REFCNT, $cv->FLAGS
+	#	   $sv_ix, $xpvcv_ix, $cv->REFCNT + 1 * 0, $cv->FLAGS
 	#	  ));
       } else {
 	$xpvcvsect->comment('STASH mg_u cur len CV_STASH START_U ROOT_U GV file PADLIST OUTSIDE outside_seq flags depth');
 	$xpvcvsect->add($xpvc);
 	$svsect->add(sprintf("&xpvcv_list[%d], %lu, 0x%x, {0}",
 			     $xpvcvsect->index, $cv->REFCNT, $cv->FLAGS));
-	$svsect->debug( $fullname, $cv->flagspv ) if $debug{flags};
+	$svsect->debug( $cv->flagspv ) if $debug{flags};
       }
-    } else { # 5.10-5.13
-      # Note: GvFORM ends also here. #149 (B::FM), t/testc.sh -O3 -DGCF,-v 149
-      my $depth = ref($cv) eq 'B::CV' ? $cv->DEPTH : 0;
-      my $outside_seq = ref($cv) eq 'B::CV' ? $cv->OUTSIDE_SEQ : '0'; # XXX? #238
+    } else {
+      $cur = length ( pack "a*", $pv );
+      if ($cur) {
+	# XXX issue 84: we need to check the cv->PV ptr not the value.
+	# "" is different to NULL for prototypes
+	$len = $B::C::pv_copy_on_grow ? 0 : $cur+1;
+      }
       my $xpvc = sprintf
 	("{%d}, %u, %u, {%s}, {%s}, %s,"
 	 ." %s, {%s}, {s\\_%x}, %s, %s, %s,"
 	 ." (CV*)%s, %s, 0x%x",
 	 0, # GvSTASH later. test 29 or Test::Harness
 	 $cur, $len,
-	 $depth,
+	 $cv->DEPTH,
 	 "NULL", "Nullhv", #MAGIC + STASH later
 	 "Nullhv",#CvSTASH later
 	 $startfield,
@@ -3712,47 +3040,34 @@ sub B::CV::save {
 	 "NULL", #cv_file later (now a HEK)
 	 $padlistsym,
 	 $xcv_outside, #if main_cv set later
-	 $outside_seq,
-	 $CvFLAGS
+	 $cv->OUTSIDE_SEQ,
+	 $cv->CvFLAGS
 	);
       if (!$new_cv_fw) {
 	$symsect->add("XPVCVIX$xpvcv_ix\t$xpvc");
 	#$symsect->add
 	#  (sprintf("CVIX%d\t(XPVCV*)&xpvcv_list[%u], %lu, 0x%x, {0}",
-	#	   $sv_ix, $xpvcv_ix, $cv->REFCNT, $cv->FLAGS
+	#	   $sv_ix, $xpvcv_ix, $cv->REFCNT + 1 * 0, $cv->FLAGS
 	#	  ));
       } else {
 	$xpvcvsect->comment('GvSTASH cur len  depth mg_u MG_STASH CV_STASH START_U ROOT_U CV_GV cv_file PADLIST OUTSIDE outside_seq cv_flags');
 	$xpvcvsect->add($xpvc);
 	$svsect->add(sprintf("&xpvcv_list[%d], %lu, 0x%x, {0}",
 			     $xpvcvsect->index, $cv->REFCNT, $cv->FLAGS));
-        $svsect->debug( $fullname, $cv->flagspv ) if $debug{flags};
+	$svsect->debug( $cv->flagspv ) if $debug{flags};
       }
     }
     if ($$cv) {
-      if ($PERL518 and (!$gv or ref($gv) eq 'B::SPECIAL')) {
+      if (!$gv or ref($gv) eq 'B::SPECIAL') {
         my $lexsub  = $cv->can('NAME_HEK') ? $cv->NAME_HEK : "_anonlex_";
         warn "lexsub name $lexsub" if $debug{gv};
-        my $cur = length( pack "a*", $lexsub );
-        if (!$PERL56) {
-          if (utf8::is_utf8($lexsub)) {
-            my $pv = $lexsub;
-            utf8::encode($pv);
-            $cur = - length $pv;
-          }
-        }
-        $init->add( "{ /* need a dynamic name hek */",
-                    sprintf("  HEK *lexhek = share_hek(savepvn(%s, %d), %d, 0);",
-                            cstring($lexsub), abs($cur), $cur),
-                    sprintf("  CvNAME_HEK_set(s\\_%x, lexhek);", $$cv),
-                    "}");
+        $init->add( sprintf( "CvNAME_HEK_set(s\\_%x, %s);", $$cv, save_hek($lexsub) ));
       } else {
         my $gvstash = $gv->STASH;
         # defer GvSTASH because with DEBUGGING it checks for GP but
         # there's no GP yet.
-        # But with -fstash the gvstash is set later
         $init->add( sprintf( "GvXPVGV(s\\_%x)->xnv_u.xgv_stash = s\\_%x;",
-                             $$cv, $$gvstash ) ) if $gvstash and !$B::C::stash;
+                             $$cv, $$gvstash ) ) if $gvstash;
         warn sprintf( "done saving GvSTASH 0x%x for CV 0x%x\n", $$gvstash, $$cv )
           if $gvstash and $debug{cv} and $debug{gv};
       }
@@ -3763,9 +3078,10 @@ sub B::CV::save {
     }
   }
   elsif ($PERL56) {
+    $cur = length ( pack "a*", $pv );
     my $xpvc = sprintf("%s, %u, %u, %s, %s, 0, Nullhv, Nullhv, %s, s\\_%x, $xsub, "
 		       ."$xsubany, Nullgv, \"\", %d, s\\_%x, (CV*)%s, 0x%x",
-	       $proto, $cur, $len, ivx($cv->IVX),
+	       cstring($pv), length($pv), length($pv), ivx($cv->IVX),
 	       nvx($cv->NVX),  $startfield,       $$root, $cv->DEPTH,
 	       $$padlist, $xcv_outside, $cv->CvFLAGS
 	      );
@@ -3775,15 +3091,16 @@ sub B::CV::save {
       $xpvcvsect->add($xpvc);
       $svsect->add(sprintf("&xpvcv_list[%d], %lu, 0x%x"),
 		   $xpvcvsect->index, $cv->REFCNT, $cv->FLAGS);
-      $svsect->debug( $fullname, $cv->flagspv ) if $debug{flags};
+      $svsect->debug( $cv->flagspv ) if $debug{flags};
     } else {
       $symsect->add("XPVCVIX$xpvcv_ix\t$xpvc");
     }
   }
   else { #5.8
+    $cur = length ( pack "a*", $pv );
     my $xpvc = sprintf("%s, %u, %u, %s, %s, 0, Nullhv, Nullhv, %s, s\\_%x, $xsub,"
 		       ." $xsubany, Nullgv, \"\", %d, s\\_%x, (CV*)s\\_%x, 0x%x, 0x%x",
-	       $proto, $cur, $len, ivx($cv->IVX),
+	       cstring($pv),      length($pv), length($pv), ivx($cv->IVX),
 	       nvx($cv->NVX),  $startfield,       $$root, $cv->DEPTH,
 	       $$padlist, $xcv_outside, $cv->CvFLAGS, $cv->OUTSIDE_SEQ
 	      );
@@ -3794,7 +3111,7 @@ sub B::CV::save {
       $xpvcvsect->add($xpvc);
       $svsect->add(sprintf("&xpvcv_list[%d], %lu, 0x%x"),
 		   $xpvcvsect->index, $cv->REFCNT, $cv->FLAGS);
-      $svsect->debug( $fullname, $cv->flagspv ) if $debug{flags};
+      $svsect->debug( $cv->flagspv ) if $debug{flags};
     } else {
       $symsect->add("XPVCVIX$xpvcv_ix\t$xpvc");
     }
@@ -3825,18 +3142,18 @@ sub B::CV::save {
     $gv->save;
     if ($PERL514) { # FIXME 5.18.0 with lexsubs
       # XXX gvcv might be PVMG
-      $init->add( sprintf( "CvGV_set((CV*)%s, (GV*)%s);", $sym, objsym($gv)) );
-      # Since 5.13.3 and CvGV_set there are checks that the CV is not RC (refcounted).
-      # Assertion "!CvCVGV_RC(cv)" failed: file "gv.c", line 219, function: Perl_cvgv_set
-      # We init with CvFLAGS = 0 and set it later, as successfully done in the Bytecode compiler
+      $init->add( sprintf( "CvGV_set((CV*)%s, (GV*)%s);", $sym, objsym($gv) ) );
+      # since 5.13.3 and CvGV_set there are checks that the CV is not RC (refcounted)
+      # assertion "!CvCVGV_RC(cv)" failed: file "gv.c", line 219, function: Perl_cvgv_set
+      # we init with CvFLAGS = 0 and set it later, as successfully done in the Bytecode compiler
       if ($CvFLAGS & 0x0400) { # CVf_CVGV_RC
         warn sprintf( "CvCVGV_RC turned off. CV flags=0x%x %s CvFLAGS=0x%x \n",
                       $cv->FLAGS, $debug{flags}?$cv->flagspv:"", $CvFLAGS & ~0x400)
           if $debug{cv};
-        $init->add( sprintf( "CvFLAGS((CV*)%s) = 0x%x; %s", $sym, $CvFLAGS,
-                             $debug{flags}?"/* ".$cv->flagspv." */":"" ) );
+        $init->add( sprintf( "CvFLAGS((CV*)%s) = %u;", $sym, $CvFLAGS ) );
       }
-      $init->add("CvSTART($sym) = $startfield;"); # XXX TODO someone is overwriting CvSTART also
+      # XXX TODO someone is overwriting CvSTART also
+      $init->add("CvSTART($sym) = $startfield;");
     } else {
       $init->add( sprintf( "CvGV(%s) = %s;", $sym, objsym($gv) ) );
     }
@@ -3845,7 +3162,7 @@ sub B::CV::save {
   }
   unless ($optimize_cop) {
     if ($MULTI) {
-      $init->add( savepvn( "CvFILE($sym)", $cv->FILE ) );
+      $init->add( savepvn( "CvFILE($sym)", $cv->FILE, $gv ) );
     } else {
       $init->add( sprintf( "CvFILE(%s) = %s;", $sym, cstring( $cv->FILE ) ) );
     }
@@ -3856,48 +3173,43 @@ sub B::CV::save {
     $stash->save($fullname);
     # $sym fixed test 27
     $init->add( sprintf( "CvSTASH_set((CV*)$sym, s\\_%x);", $$stash ) );
-    # 5.18 bless does not inc sv_objcount anymore. broken by ddf23d4a1ae (#208)
-    # We workaround this 5.18 de-optimization by adding it if at least a DESTROY
-    # method exists.
-    $init->add("++PL_sv_objcount;") if $cvname eq 'DESTROY' and $] >= 5.017011;
     warn sprintf( "done saving STASH 0x%x for CV 0x%x\n", $$stash, $$cv )
       if $debug{cv} and $debug{gv};
   }
   my $magic = $cv->MAGIC;
   if ($magic and $$magic) {
-    $cv->save_magic($fullname); # XXX will this work?
+    $cv->save_magic; # XXX will this work?
   }
   if (!$new_cv_fw) {
     $symsect->add(sprintf(
       "CVIX%d\t(XPVCV*)&xpvcv_list[%u], %lu, 0x%x".($PERL510?", {0}":''),
-      $sv_ix, $xpvcv_ix, $cv->REFCNT, $cv->FLAGS
+      $sv_ix, $xpvcv_ix, $cv->REFCNT + ($PERL510 ? 1 : 0), $cv->FLAGS
       )
     );
   }
   if ($cur) {
-    warn sprintf( "Saving CV proto %s for CV $sym 0x%x\n", cstring($pv), $$cv ) if $debug{cv};
+    warn sprintf( "Saving CV proto %s for CV 0x%x\n", $pv, $$cv ) if $debug{cv};
   }
   # issue 84: empty prototypes sub xx(){} vs sub xx{}
-  if (defined $pv) {
-    if ($PERL510 and  $cur) {
+  if ($PERL510) {
+    if ($cur) {
       $init->add( sprintf("SvPVX(&sv_list[%d]) = HEK_KEY(%s);", $sv_ix, $pvsym));
-    } elsif (!$B::C::const_strings) { # not static, they are freed when redefined
+    } elsif (!$B::C::pv_copy_on_grow) { # not static, they are freed when redefined
       $init->add( sprintf("SvPVX(&sv_list[%d]) = savepvn(%s, %u);",
-                          $sv_ix, $proto, $cur));
+			  $sv_ix, cstring($pv), $cur));
     } else {
       $init->add( sprintf("SvPVX(&sv_list[%d]) = %s;",
-                          $sv_ix, $proto));
+			  $sv_ix, cstring($pv)));
     }
   }
   return $sym;
 }
 
-package B::C;
 my @_v = Internals::V() if $] >= 5.011;
-sub __ANON__::_V { @_v };
+sub B::_V { @_v };
 
 sub B::GV::save {
-  my ($gv, $filter) = @_;
+  my ($gv) = @_;
   my $sym = objsym($gv);
   if ( defined($sym) ) {
     warn sprintf( "GV 0x%x already saved as $sym\n", $$gv ) if $debug{gv};
@@ -3908,105 +3220,75 @@ sub B::GV::save {
     $sym = savesym( $gv, "gv_list[$ix]" );
     warn sprintf( "Saving GV 0x%x as $sym\n", $$gv ) if $debug{gv};
   }
-  warn sprintf( "  GV %s $sym type=%d, flags=0x%x %s\n", $gv->NAME,
-                # B::SV::SvTYPE not with 5.6
-                B::SV::SvTYPE($gv), $gv->FLAGS) if $debug{gv} and !$PERL56;
+  warn sprintf( "  GV $sym type=%d, flags=0x%x\n", B::SV::SvTYPE($gv), $gv->FLAGS )
+    if $debug{gv} and !$PERL56; # B::SV::SvTYPE not with 5.6
   if ($PERL510 and $gv->FLAGS & 0x40000000) { # SVpbm_VALID
     warn sprintf( "  GV $sym isa FBM\n") if $debug{gv};
     return B::BM::save($gv);
   }
-
+if (0) {
+  if ($PERL512 and $gv->FLAGS & 0x2) { # IV
+    warn sprintf( "  Skip GV $sym isa IV (RV)\n") if $debug{gv};
+    return $sym;
+  }
+  elsif (!$PERL510 and $gv->FLAGS & 0x3) { # RV
+    warn sprintf( "  Skip GV $sym isa RV\n") if $debug{gv};
+    return $sym;
+  }
+  elsif ($PERL510 and $]< 5.012 and $gv->FLAGS & 0x4) { # 510 RV
+    warn sprintf( "  Skip GV $sym isa RV\n") if $debug{gv};
+    return $sym;
+  }
+}
   my $gvname   = $gv->NAME;
-  my $package;
-  if (ref($gv->STASH) eq 'B::SPECIAL') {
-    $package = '__ANON__';
-    warn sprintf( "GV STASH = SPECIAL $gvname\n") if $debug{gv};
-  } else {
-    $package = $gv->STASH->NAME;
-  }
-  return $sym if skip_pkg($package);
-
-  my $fullname = $package . "::" . $gvname;
-  my $fancyname;
-  if ( $filter and $filter =~ / :pad/ ) {
-    $fancyname = cstring($filter);
-    $filter = 0;
-  } else {
-    $fancyname = cstring($fullname);
-  }
-  # checked for defined'ness in Carp. So the GV must exist, the CV not
-  if ($fullname =~ /^threads::(tid|AUTOLOAD)$/ and !$ITHREADS) {
-    $filter = 8;
-  }
+  my $package  = $gv->STASH->NAME;
+  return $sym if $skip_package{$package} or $package =~ /^B::C(C?)::/;
 
   my $is_empty = $gv->is_empty;
-  if (!defined $gvname and $is_empty) { # 5.8 curpad name
-    return q/(SV*)&PL_sv_undef/;
-  }
-  my $name     = $package eq 'main' ? cstring($gvname) : cstring($fullname);
-  my $notqual  = ($] >= 5.008009 and $package eq 'main') ? 'GV_NOTQUAL' : '0';
-  warn "  GV name is $fancyname\n" if $debug{gv};
+  my $fullname = $package . "::" . $gvname;
+  my $name     = cstring($fullname);
+  warn "  GV name is $name\n" if $debug{gv};
   my $egvsym;
   my $is_special = ref($gv) eq 'B::SPECIAL';
 
-  if ($fullname =~ /^(bytes|utf8)::AUTOLOAD$/) {
-    $gv = force_heavy($package); # defer to run-time autoload, or compile it in?
-    $sym = savesym( $gv, $sym ); # override new gv ptr to sym
-  }
   if ( !$is_empty ) {
     my $egv = $gv->EGV;
-    unless (ref($egv) eq 'B::SPECIAL' or ref($egv->STASH) eq 'B::SPECIAL') {
+    unless (ref($egv) eq 'B::SPECIAL') {
       my $estash = $egv->STASH->NAME;
       if ( $$gv != $$egv ) {
         warn(sprintf( "EGV name is %s, saving it now\n",
                       $estash . "::" . $egv->NAME )
             ) if $debug{gv};
         $egvsym = $egv->save;
+        #{
+          #no strict 'refs';
+          # catch imported AUTOLOAD (unused)
+          #svref_2object( \*{"$estash\::AUTOLOAD"} )->save
+          #  if $estash and defined ${"$estash\::"}{AUTOLOAD};
+          #svref_2object( \*{"$estash\::CLONE"} )->save
+          #  if $estash and defined ${"$estash\::"}{CLONE};
+        #}
       }
     }
   }
-  #if ($fullname eq 'threads::tid' and !$ITHREADS) { # checked for defined'ness in Carp
-  #  $init->add(qq[$sym = (GV*)&PL_sv_undef;]);
-  #  return $sym;
-  #}
-  if ($fullname =~ /^main::STDOUT$/i and $PERL56) {
-    return 'Nullgv'; # perl.c: setdefout(Nullgv)
-  }
-  my $core_syms = {ENV    => 'PL_envgv',
-                   ARGV   => 'PL_argvgv',
-                   INC    => 'PL_incgv',
-                   STDIN  => 'PL_stdingv',
-                   STDERR => 'PL_stderrgv',
-                   "\010" => 'PL_hintgv',  # ^H
-                   "_"    => 'PL_defgv',
-                   "@"    => 'PL_errgv',
-                   "\022" => 'PL_replgv',  # ^R
-                  };
-  my $is_coresym;
-  # those are already initialized in init_predump_symbols()
-  # and init_main_stash()
-  for my $s (sort keys %$core_syms) {
-    if ($fullname eq 'main::'.$s) {
-      $sym = savesym( $gv, $core_syms->{$s} );
-      # $init->add( sprintf( "SvREFCNT($sym) = %u;", $gv->REFCNT ) );
-      # return $sym;
-      $is_coresym++;
-    }
-  }
-  if ($fullname =~ /^main::std(in|out|err)$/) { # same as uppercase above
-    $init->add(qq[$sym = gv_fetchpv($name, $notqual, SVt_PVGV);]);
-    $init->add( sprintf( "SvREFCNT($sym) = %u;", $gv->REFCNT ) );
+  if ($fullname eq 'threads::tid' and !$ITHREADS) { # checked for defined'ness in Carp
+    $init->add(qq[$sym = (GV*)&PL_sv_undef;]);
     return $sym;
   }
-  elsif ($fullname eq 'main::0') { # dollar_0 already handled before, so don't overwrite it
-    $init->add(qq[$sym = gv_fetchpv($name, $notqual, SVt_PV);]);
-    $init->add( sprintf( "SvREFCNT($sym) = %u;", $gv->REFCNT ) );
+  if ($fullname eq 'main::ENV') {
+    $init->add(qq[$sym = PL_envgv;]);
+    my $refcnt = $gv->REFCNT;
+    $init->add( sprintf( "SvREFCNT($sym) += %u;", $refcnt ) ) if $refcnt > 0;
     return $sym;
   }
-  # gv_fetchpv loads Errno resp. Tie::Hash::NamedCapture, but needs *INC #90
-  #elsif ( $fullname eq 'main::!' or $fullname eq 'main::+' or $fullname eq 'main::-') {
-  #  $init2->add(qq[$sym = gv_fetchpv($name, TRUE, SVt_PVGV);]); # defer until INC is setup
-  #  $init2->add( sprintf( "SvREFCNT($sym) = %u;", $gv->REFCNT ) );
+  if ($fullname eq 'main::ARGV') {
+    $init->add(qq[$sym = PL_argvgv;]);
+    my $refcnt = $gv->REFCNT;
+    $init->add( sprintf( "SvREFCNT($sym) += %u;", $refcnt ) ) if $refcnt > 0;
+    return $sym;
+  }
+  # defer to the end because we remove compiler-internal and skipped stuff
+  #if ($fullname eq 'main::INC' and !$_[2]) {
   #  return $sym;
   #}
   my $svflags    = $gv->FLAGS;
@@ -4019,60 +3301,37 @@ sub B::GV::save {
   sub Save_IO()   { 32 }
 
   my $gp;
-  my $gvadd = $notqual ? "$notqual|GV_ADD" : "GV_ADD";
-  if ( $PERL510 and $gv->isGV_with_GP and !$is_coresym) {
+  if ( $PERL510 and $gv->isGV_with_GP ) {
     $gp = $gv->GP;    # B limitation
-    # warn "XXX EGV='$egvsym' for IMPORTED_HV" if $gv->GvFLAGS & 0x40;
     if ( defined($egvsym) && $egvsym !~ m/Null/ ) {
-      warn(sprintf("Shared GV alias for *$fullname 0x%x%s %s to $egvsym\n",
-                   $svflags, $debug{flags} ? "(".$gv->flagspv.")" : "",
-                  )) if $debug{gv};
       # Shared glob *foo = *bar
-      $init->add(qq[$sym = gv_fetchpv($name, $gvadd|GV_ADDMULTI, SVt_PVGV);]);
+      $init->add(qq[$sym = gv_fetchpv($name, TRUE, SVt_PVGV);]);
       $init->add( "GvGP_set($sym, GvGP($egvsym));" );
       $is_empty = 1;
     }
-    elsif ( $gp and exists $gptable{0+$gp} ) {
-      warn(sprintf("Shared GvGP for *$fullname 0x%x%s %s GP:0x%x\n",
-                   $svflags, $debug{flags} ? "(".$gv->flagspv.")" : "",
-                   $gv->FILE, $gp
-                  )) if $debug{gv};
-      $init->add(qq[$sym = gv_fetchpv($name, $notqual, SVt_PVGV);]);
-      $init->add( sprintf("GvGP_set($sym, %s);", $gptable{0+$gp}) );
-      $is_empty = 1;
-    }
-    elsif ( $gp and !$is_empty and $gvname =~ /::$/) {
-      warn(sprintf("Shared GvGP for stash %$fullname 0x%x%s %s GP:0x%x\n",
-                   $svflags, $debug{flags} ? "(".$gv->flagspv.")" : "",
-                   $gv->FILE, $gp
-                  )) if $debug{gv};
-      $init->add(qq[$sym = gv_fetchpv($name, GV_ADD, SVt_PVHV);]);
-      $gptable{0+$gp} = "GvGP($sym)" if 0+$gp;
-    }
     elsif ( $gp and !$is_empty ) {
-      warn(sprintf("New GV for *$fullname 0x%x%s %s GP:0x%x\n",
+      warn(sprintf(
+                   "New GvGP for *$fullname 0x%x%s %s GP:0x%x\n",
                    $svflags, $debug{flags} ? "(".$gv->flagspv.")" : "",
                    $gv->FILE, $gp
                   )) if $debug{gv};
       # XXX !PERL510 and OPf_COP_TEMP we need to fake PL_curcop for gp_file hackery
-      $init->add(qq[$sym = gv_fetchpv($name, $gvadd, SVt_PV);]);
+      $init->add(qq[$sym = gv_fetchpv($name, TRUE, SVt_PV);]);
+      $init->add( sprintf("GvGP_set($sym, Perl_newGP(aTHX_ $sym));") );
       $savefields = Save_HV | Save_AV | Save_SV | Save_CV | Save_FORM | Save_IO;
-      $gptable{0+$gp} = "GvGP($sym)";
     }
     else {
-      $init->add(qq[$sym = gv_fetchpv($name, $gvadd, SVt_PVGV);]);
+      $init->add(qq[$sym = gv_fetchpv($name, TRUE, SVt_PVGV);]);
+      $init->add( sprintf("GvGP_set($sym, Perl_newGP(aTHX_ $sym)); /* empty GP */") );
     }
-  } elsif (!$is_coresym) {
-    $init->add(qq[$sym = gv_fetchpv($name, $gvadd, SVt_PV);]);
-  }
-  my $gvflags = $gv->GvFLAGS;
-  if ($gvflags > 256 and !$PERL510) { # $gv->GvFLAGS as U8 single byte only
-    $gvflags = $gvflags & 255;
+  } else {
+    $init->add(qq[$sym = gv_fetchpv($name, TRUE, SVt_PV);]);
   }
   $init->add( sprintf( "SvFLAGS($sym) = 0x%x;%s", $svflags,
-                     $debug{flags}?" /* ".$gv->flagspv." */":"" ),
-	           sprintf( "GvFLAGS($sym) = 0x%x; %s", $gvflags,
-                     $debug{flags}?"/* ".$gv->flagspv(SVt_PVGV)." */":"" ));
+                       $debug{flags}?" /* ".$gv->flagspv." */":"" ));
+  my $gvflags = $gv->GvFLAGS;
+  if ($gvflags > 256) { $gvflags = $gvflags && 256 }; # $gv->GvFLAGS as U8
+  $init->add( sprintf( "GvFLAGS($sym) = %d;",   $gvflags ));
   $init->add( sprintf( "GvLINE($sym) = %d;",
 		       ($gv->LINE > 2147483647  # S32 INT_MAX
 			? 4294967294 - $gv->LINE
@@ -4086,15 +3345,18 @@ sub B::GV::save {
     $init->add("if (SvPOK($sym) && !SvPVX($sym)) SvPVX($sym) = (char*)emptystring;");
   }
 
-  # walksymtable creates an extra reference to the GV (#197)
-  if ( $gv->REFCNT > 1 ) {
-    $init->add( sprintf( "SvREFCNT($sym) = %u;", $gv->REFCNT) );
-  }
+  # Shouldn't need to do save_magic since gv_fetchpv handles that
+  #$gv->save_magic if $PERL510;
+  # Will always be > 1
+  my $refcnt = $gv->REFCNT;
+  $init->add( sprintf( "SvREFCNT($sym) += %u;", $refcnt ) ) if $refcnt > 0;
+
   return $sym if $is_empty;
 
+  # B::walksymtable creates an extra reference to the GV
   my $gvrefcnt = $gv->GvREFCNT;
   if ( $gvrefcnt > 1 ) {
-    $init->add( sprintf( "GvREFCNT($sym) += %u;", $gvrefcnt - 1) );
+    $init->add( sprintf( "GvREFCNT($sym) += %u;", $gvrefcnt - 1 ) );
   }
 
   warn "check which savefields for \"$gvname\"\n" if $debug{gv};
@@ -4104,19 +3366,8 @@ sub B::GV::save {
     $savefields = Save_HV | Save_AV | Save_SV | Save_CV | Save_FORM | Save_IO;
   }
   elsif ( $fullname eq 'main::!' ) { #Errno
-    $savefields = Save_HV | Save_SV | Save_CV;
+    $savefields = Save_HV;
   }
-  elsif ( $fullname eq 'main::ENV' or $fullname eq 'main::SIG' ) {
-    $savefields = Save_AV | Save_SV | Save_CV | Save_FORM | Save_IO;
-  }
-  elsif ( $fullname eq 'main::ARGV' ) {
-    $savefields = Save_HV | Save_SV | Save_CV | Save_FORM | Save_IO;
-  }
-  elsif ( $fullname =~ /^main::STD(IN|OUT|ERR)$/ ) {
-    $savefields = Save_FORM | Save_IO;
-  }
-  $savefields &= ~$filter if ($filter and $filter !~ / :pad/
-                              and $filter =~ /^\d+$/ and $filter > 0 and $filter < 64);
   # issue 79: Only save stashes for stashes.
   # But not other values to avoid recursion into unneeded territory.
   # We walk via savecv, not via stashes.
@@ -4142,24 +3393,16 @@ sub B::GV::save {
     }
   }
 
-  my $gvsv;
   if ($savefields) {
     # Don't save subfields of special GVs (*_, *1, *# and so on)
     warn "GV::save saving subfields $savefields\n" if $debug{gv};
-    $gvsv = $gv->SV;
+    my $gvsv = $gv->SV;
     if ( $$gvsv && $savefields & Save_SV ) {
       warn "GV::save \$".$sym." $gvsv\n" if $debug{gv};
-      my $core_svs = { # special SV syms to assign to the right GvSV
-         "\\"   => 'PL_ors_sv',
-         "/"    => 'PL_rs',
-         "@"    => 'PL_errors',
-      };
-      for my $s (sort keys %$core_svs) {
-        if ($fullname eq 'main::'.$s) {
-          savesym( $gvsv, $core_svs->{$s} ); # TODO: This could bypass BEGIN settings (->save is ignored)
-        }
+      if ($fullname eq 'main::@') { # $@ = PL_errors
+	$init->add( "GvSVn($sym) = (SV*)PL_errors;" );
       }
-      if ($gvname eq 'VERSION' and $xsub{$package} and $gvsv->FLAGS & SVf_ROK and !$PERL56) {
+      elsif ($gvname eq 'VERSION' and $xsub{$package} and $gvsv->FLAGS & SVf_ROK and !$PERL56) {
 	warn "Strip overload from $package\::VERSION, fails to xs boot (issue 91)\n" if $debug{gv};
 	my $rv = $gvsv->object_2svref();
 	my $origsv = $$rv;
@@ -4168,16 +3411,7 @@ sub B::GV::save {
 	svref_2object(\${$fullname})->save($fullname);
 	$init->add( sprintf( "GvSVn($sym) = (SV*)s\\_%x;", $$gvsv ) );
       } else {
-	$gvsv->save($fullname); #even NULL save it, because of gp_free nonsense
-        # we need sv magic for the core_svs (PL_rs -> gv) (#314)
-        if (exists $core_svs->{$gvname}) {
-          if ($gvname eq "\\") {  # ORS special case #318 (initially NULL)
-            return $sym;
-          } else {
-            $gvsv->save_magic($fullname) if ref($gvsv) eq 'B::PVMG';
-            $init->add( sprintf( "SvREFCNT(s\\_%x) += 1;", $$gvsv ) );
-          }
-        }
+	$gvsv->save($fullname); #mostly NULL. $gvsv->isa("B::NULL");
 	$init->add( sprintf( "GvSVn($sym) = (SV*)s\\_%x;", $$gvsv ) );
       }
       if ($fullname eq 'main::$') { # $$ = PerlProc_getpid() issue #108
@@ -4188,12 +3422,17 @@ sub B::GV::save {
     }
     my $gvav = $gv->AV;
     if ( $$gvav && $savefields & Save_AV ) {
-      warn "GV::save \@$fullname\n" if $debug{gv};
-      $gvav->save($fullname);
-      $init->add( sprintf( "GvAV($sym) = s\\_%x;", $$gvav ) );
-      if ($fullname eq 'main::-') {
-        $init->add( sprintf("AvFILLp(s\\_%x) = -1;", $$gvav),
-                    sprintf("AvMAX(s\\_%x) = -1;", $$gvav));
+      if ($PERL510 and $fullname eq 'main::ARGV') {
+        $init->add( '/* Skip overwriting @main::ARGV */' );
+        warn "Skipping GV::save \@$fullname\n" if $debug{gv};
+      } else {
+        warn "GV::save \@$fullname\n" if $debug{gv};
+	if ($fullname eq 'main::+' or $fullname eq 'main::-') {
+	  $init->add("/* \@$gvname force saving of Tie::Hash::NamedCapture */");
+	  mark_package('Tie::Hash::NamedCapture', 1);
+	}
+        $gvav->save($fullname);
+        $init->add( sprintf( "GvAV($sym) = s\\_%x;", $$gvav ) );
       }
     }
     my $gvhv = $gv->HV;
@@ -4202,22 +3441,11 @@ sub B::GV::save {
 	warn "GV::save \%$fullname\n" if $debug{gv};
 	if ($fullname eq 'main::!') { # force loading Errno
 	  $init->add("/* \%! force saving of Errno */");
-          unless ($ENV{CPANEL_PERL}) {  # patched Errno to exclude Config check
-            mark_package('Config', 1);  # Errno needs Config to set the EGV
-            walk_syms('Config');
-          }
 	  mark_package('Errno', 1);   # B::C needs Errno but does not import $!
 	} elsif ($fullname eq 'main::+' or $fullname eq 'main::-') {
 	  $init->add("/* \%$gvname force saving of Tie::Hash::NamedCapture */");
-          if ($] >= 5.014) {
-            unless ($ENV{CPANEL_PERL}) { # cPanel built DynaLoader to exclude Config
-              mark_package('Config', 1);  # DynaLoader needs Config to set the EGV
-              walk_syms('Config');
-            }
-            svref_2object(\&{'Tie::Hash::NamedCapture::bootstrap'})->save;
-          }
 	  mark_package('Tie::Hash::NamedCapture', 1);
-        }
+	}
 	# XXX TODO 49: crash at BEGIN { %warnings::Bits = ... }
 	if ($fullname ne 'main::INC') {
 	  $gvhv->save($fullname);
@@ -4239,15 +3467,13 @@ sub B::GV::save {
       $gvcv = $gv->CV; # try again
     }
     if ( $$gvcv and $savefields & Save_CV
-         and ref($gvcv) eq 'B::CV'
          and ref($gvcv->GV->EGV) ne 'B::SPECIAL'
-         and !skip_pkg($package) )
+         and !$skip_package{$package} )
     {
-      my $origname = $gvcv->GV->EGV->STASH->NAME . "::" . $gvcv->GV->EGV->NAME;
-      my $cvsym;
-      if ( $gvcv->XSUB and $fullname ne $origname ) {    #XSUB CONSTSUB alias
+      my $origname =
+        cstring( $gvcv->GV->EGV->STASH->NAME . "::" . $gvcv->GV->EGV->NAME );
+      if ( $gvcv->XSUB and $name ne $origname ) {    #XSUB CONSTSUB alias
 	my $package = $gvcv->GV->EGV->STASH->NAME;
-        $origname = cstring( $origname );
         warn "Boot $package, XS CONSTSUB alias of $fullname to $origname\n" if $debug{pkg};
         mark_package($package, 1);
         {
@@ -4264,19 +3490,21 @@ sub B::GV::save {
           svref_2object( \&{"$dep\::bootstrap"} )->save;
         }
         # must save as a 'stub' so newXS() has a CV to populate
-	$init2->add("GvCV_set($sym, (CV*)SvREFCNT_inc_simple_NN(get_cv($origname, GV_ADD)));");
+        $init->add("{\tCV *cv;
+		cv = get_cv($origname,TRUE);
+		GvCV_set($sym, cv);
+		SvREFCNT_inc((SV *)cv);","}");
       }
       elsif (!$PERL510 or $gp) {
-        $origname = cstring( $origname );
 	if ($fullname eq 'Internals::V') { # local_patches if $] >= 5.011
-	  $gvcv = svref_2object( \&__ANON__::_V );
+	  $gvcv = svref_2object( \&B::_V );
 	}
 	# TODO: may need fix CvGEN if >0 to re-validate the CV methods
 	# on PERL510 (>0 + <subgeneration)
 	warn "GV::save &$fullname...\n" if $debug{gv};
-        $cvsym = $gvcv->save($fullname);
-        # backpatch "$sym = gv_fetchpv($name, GV_ADD, SVt_PV)" to SVt_PVCV
-        if ($cvsym =~ /(\(char\*\))?get_cv\("/) {
+        my $cvsym = $gvcv->save($fullname);
+        # backpatch "$sym = gv_fetchpv($name, TRUE, SVt_PV)" to FALSE and SVt_PVCV
+        if ($cvsym =~ /get_cv\("/) {
 	  if (!$xsub{$package} and in_static_core($package, $gvname)) {
 	    my $in_gv;
 	    for (@{ $init->[-1]{current} }) {
@@ -4284,77 +3512,29 @@ sub B::GV::save {
 		s/^.*\Q$sym\E.*=.*;//;
 		s/GvGP_set\(\Q$sym\E.*;//;
 	      }
-	      if (/^\Q$sym = gv_fetchpv($name, GV_ADD, SVt_PV);\E/) {
-		s/^\Q$sym = gv_fetchpv($name, GV_ADD, SVt_PV);\E/$sym = gv_fetchpv($name, GV_ADD, SVt_PVCV);/;
+	      if (/^\Q$sym = gv_fetchpv($name, TRUE, SVt_PV);\E/) {
+		s/^\Q$sym = gv_fetchpv($name, TRUE, SVt_PV);\E/$sym = gv_fetchpv($name, 0, SVt_PVCV);/;
 		$in_gv++;
 		warn "removed $sym GP assignments $origname (core CV)\n" if $debug{gv};
 	      }
 	    }
-	    $init->add( sprintf( "GvCV_set($sym, (CV*)(%s));", $cvsym ));
+	    $init->add( sprintf( "GvCV_set($sym, (CV*)(%s));", $cvsym ) );
 	  }
 	  elsif ($xsub{$package}) {
-            # must save as a 'stub' so newXS() has a CV to populate later in dl_init()
-            warn "save stub CvGV for $sym GP assignments $origname (XS CV)\n" if $debug{gv};
-            $init2->add("GvCV_set($sym, (CV*)SvREFCNT_inc_simple_NN(get_cv($origname, GV_ADD)));");
+	    # must save as a 'stub' so newXS() has a CV to populate later in dl_init()
+	    warn "save stub CvGV for $sym GP assignments $origname (XS CV)\n" if $debug{gv};
+	    $init->add("{\tCV *cv;
+		cv = get_cv($origname,TRUE);
+		GvCV_set($sym, cv);
+		SvREFCNT_inc((SV *)cv);","}");
 	  }
 	  else {
-            $init2->add( sprintf( "GvCV_set($sym, (CV*)(%s));", $cvsym ));
+	    $init->add( sprintf( "GvCV_set($sym, (CV*)(%s));", $cvsym ) );
 	  }
-          if ($gvcv->XSUBANY) {
-            # some XSUB's set this field. but which part?
-            my $xsubany = $gvcv->XSUBANY;
-            if ($package =~ /^DBI::(common|db|dr|st)/) {
-              # DBI uses the any_ptr for dbi_ima_t *ima, and all dr,st,db,fd,xx handles
-              # for which several ptrs need to be patched. #359
-              # the ima is internal only
-              my $dr = $1;
-              warn sprintf("eval_pv: DBI->_install_method(%s-) (XSUBANY=0x%x)\n",
-                           $fullname, $xsubany) if $verbose and $debug{cv};
-              $init2->add_eval(sprintf("DBI->_install_method('%s', 'DBI.pm', \$DBI::DBI_methods{%s}{%s})",
-                                       $fullname, $dr, $fullname));
-            } elsif ($package eq 'Tie::Hash::NamedCapture') {
-              # pretty high _ALIAS CvXSUBANY.any_i32 values
-            } else {
-              # try if it points to an already registered symbol
-              my $anyptr = $symtable{ sprintf( "s\\_%x", $xsubany ) };
-              if ($anyptr and $xsubany > 1000) { # not a XsubAliases
-                $init2->add( sprintf( "CvXSUBANY(GvCV($sym)).any_ptr = &%s;", $anyptr ));
-              } # some heuristics TODO. long or ptr? TODO 32bit
-              elsif ($xsubany > 0x100000 and ($xsubany < 0xffffff00 or $xsubany > 0x100000000))
-              {
-                if ($package eq 'POSIX' and $gvname =~ /^is/) {
-                  # need valid XSANY.any_dptr
-                  $init2->add( sprintf( "CvXSUBANY(GvCV($sym)).any_dptr = (void*)&%s;", $gvname));
-                } elsif ($package eq 'List::MoreUtils' and $gvname =~ /_iterator$/) { # should be only the 2 iterators
-                  $init2->add( sprintf( "CvXSUBANY(GvCV($sym)).any_ptr = (void*)&%s;", "XS_List__MoreUtils__".$gvname));
-                } else {
-                  warn sprintf("TODO: Skipping %s->XSUBANY = 0x%x\n", $fullname, $xsubany ) if $verbose;
-                  $init2->add( sprintf( "/* TODO CvXSUBANY(GvCV($sym)).any_ptr = 0x%lx; */", $xsubany ));
-                }
-              } elsif ($package eq 'Fcntl') {
-                # S_ macro values
-              } else {
-                # most likely any_i32 values for the XsubAliases provided by xsubpp
-                $init2->add( sprintf( "/* CvXSUBANY(GvCV($sym)).any_i32 = 0x%x; XSUB Alias */", $xsubany ));
-              }
-            }
-          }
 	}
-	elsif ($cvsym =~ /^(cv|&sv_list)/) {
-          $init->add( sprintf( "GvCV_set($sym, (CV*)(%s));", $cvsym ));
-        }
 	else {
-            warn "wrong CvGV for $sym $origname: $cvsym\n" if $debug{gv} or $verbose;
-        }
-      }
-      # special handling for backref magic
-      if ($PERL514 and $cvsym and $cvsym !~ /(get_cv\("|NULL|lexwarn)/ and $gv->MAGICAL) {
-        my @magic = $gv->MAGIC;
-        foreach my $mg (@magic) {
-          $init->add( "sv_magic((SV*)$sym, (SV*)$cvsym, '<', 0, 0);",
-                      "CvCVGV_RC_off($cvsym);"
-                    ) if $mg->TYPE eq '<';
-        }
+	  $init->add( sprintf( "GvCV_set($sym, (CV*)(%s));", $cvsym ) );
+	}
       }
     }
     if (!$PERL510 or $gp) {
@@ -4362,21 +3542,13 @@ sub B::GV::save {
 	# TODO implement heksect to place all heks at the beginning
 	#$heksect->add($gv->FILE);
 	#$init->add(sprintf("GvFILE_HEK($sym) = hek_list[%d];", $heksect->index));
-
-        # XXX Maybe better leave it NULL or asis, than fighting broken
-        if ($B::C::stash and $fullname =~ /::$/) {
-          # ignore stash hek asserts when adding the stash
-          # he->shared_he_he.hent_hek == hek assertions (#46 with IO::Poll::)
-        } else {
-          my $file = save_hek($gv->FILE);
-          $init->add(sprintf("GvFILE_HEK(%s) = %s;", $sym, $file))
-            if $file ne 'NULL' and !$optimize_cop;
-        }
-	# $init->add(sprintf("GvNAME_HEK($sym) = %s;", save_hek($gv->NAME))) if $gv->NAME;
+	$init->add(sprintf("GvFILE_HEK($sym) = %s;", save_hek($gv->FILE)))
+	  unless $optimize_cop;
+	$init->add(sprintf("GvNAME_HEK($sym) = %s;", save_hek($gv->NAME))) if $gv->NAME;
       } else {
 	# XXX ifdef USE_ITHREADS and PL_curcop->op_flags & OPf_COP_TEMP
 	# GvFILE is at gp+1
-	$init->add( sprintf( "GvFILE(%s) = %s;", $sym, cstring( $gv->FILE ) ))
+	$init->add( sprintf( "GvFILE($sym) = %s;", cstring( $gv->FILE ) ))
 	  unless $optimize_cop;
 	warn "GV::save GvFILE(*$fullname) " . cstring( $gv->FILE ) . "\n"
 	  if $debug{gv} and !$ITHREADS;
@@ -4385,14 +3557,14 @@ sub B::GV::save {
       if ( $$gvform && $savefields & Save_FORM ) {
 	warn "GV::save GvFORM(*$fullname) ...\n" if $debug{gv};
 	$gvform->save($fullname);
-	$init->add( sprintf( "GvFORM($sym) = (CV*)s\\_%x;", $$gvform ));
-        # glob_assign_glob analog to CV
-	$init->add( sprintf( "SvREFCNT_inc(s\\_%x);", $$gvform )) if $PERL510;
+	$init->add( sprintf( "GvFORM($sym) = (CV*)s\\_%x;", $$gvform ) );
 	warn "GV::save GvFORM(*$fullname) done\n" if $debug{gv};
       }
       my $gvio = $gv->IO;
       if ( $$gvio && $savefields & Save_IO ) {
 	warn "GV::save GvIO(*$fullname)...\n" if $debug{gv};
+	$gvio->save($fullname);
+	$init->add( sprintf( "GvIOp($sym) = s\\_%x;", $$gvio ) );
 	if ( $fullname =~ m/::DATA$/ &&
 	     ( $fullname eq 'main::DATA' or $B::C::save_data_fh) ) # -O2 or 5.8
 	{
@@ -4400,24 +3572,15 @@ sub B::GV::save {
 	  my $fh = *{$fullname}{IO};
 	  use strict 'refs';
 	  warn "GV::save_data $sym, $fullname ...\n" if $debug{gv};
-          $gvio->save($fullname, 'is_DATA');
-          $init->add( sprintf( "GvIOp($sym) = s\\_%x;", $$gvio ) );
 	  $gvio->save_data( $sym, $fullname, <$fh> ) if $fh->opened;
 	} elsif ( $fullname =~ m/::DATA$/ && !$B::C::save_data_fh ) {
-          $gvio->save($fullname, 'is_DATA');
-          $init->add( sprintf( "GvIOp($sym) = s\\_%x;", $$gvio ) );
 	  warn "Warning: __DATA__ handle $fullname not stored. Need -O2 or -fsave-data.\n";
-	} else {
-          $gvio->save($fullname);
-          $init->add( sprintf( "GvIOp($sym) = s\\_%x;", $$gvio ) );
-        }
+	}
 	warn "GV::save GvIO(*$fullname) done\n" if $debug{gv};
       }
       $init->add("");
     }
   }
-  # Shouldn't need to do save_magic since gv_fetchpv handles that. Esp. < and IO not
-  # $gv->save_magic($fullname) if $PERL510;
   warn "GV::save *$fullname done\n" if $debug{gv};
   return $sym;
 }
@@ -4428,12 +3591,11 @@ sub B::AV::save {
   return $sym if defined $sym;
 
   $fullname = '' unless $fullname;
-  my ($fill, $avreal, $max);
+  my ($fill, $avreal);
   # cornercase: tied array without FETCHSIZE
   eval { $fill = $av->FILL; };
   $fill = -1 if $@;    # catch error in tie magic
   my $ispadlist = ref($av) eq 'B::PADLIST';
-  $max = $fill;
   my $svpcast = $ispadlist ? "(PAD*)" : "(SV*)";
 
   if ($] >= 5.017006 and $ispadlist) {
@@ -4441,6 +3603,7 @@ sub B::AV::save {
     my @array = $av->ARRAY;
     $fill = scalar @array;
     $padlistsect->add("$fill, NULL, 0"); # Perl_pad_new(0)
+    # $init->add("pad_list[$padlist_index] = Perl_pad_new(0);");
     $padlist_index = $padlistsect->index;
     $sym = savesym( $av, "&padlist_list[$padlist_index]" );
   }
@@ -4456,7 +3619,7 @@ sub B::AV::save {
   elsif ($PERL514) {
     # 5.13.3: STASH, MAGIC, fill max ALLOC
     my $line = "Nullhv, {0}, -1, -1, 0";
-    $line = "Nullhv, {0}, $fill, $max, 0" if $B::C::av_init or $B::C::av_init2;
+    $line = "Nullhv, {0}, $fill, $fill, 0" if $B::C::av_init or $B::C::av_init2;
     $xpvavsect->add($line);
     $svsect->add(sprintf("&xpvav_list[%d], %lu, 0x%x, {%s}",
                          $xpvavsect->index, $av->REFCNT, $av->FLAGS,
@@ -4466,8 +3629,8 @@ sub B::AV::save {
   elsif ($PERL510) {
     # 5.9.4+: nvu fill max iv MG STASH
     my $line = "{0}, -1, -1, {0}, {0}, Nullhv";
-    $line = "{0}, $fill, $max, {0}, {0}, Nullhv" if $B::C::av_init or $B::C::av_init2;
-    $line = "Nullhv, {0}, $fill, $max, NULL" if $PERL514;
+    $line = "{0}, $fill, $fill, {0}, {0}, Nullhv" if $B::C::av_init or $B::C::av_init2;
+    $line = "Nullhv, {0}, $fill, $fill, NULL" if $PERL514;
     $xpvavsect->add($line);
     $svsect->add(sprintf("&xpvav_list[%d], %lu, 0x%x, {%s}",
                          $xpvavsect->index, $av->REFCNT, $av->FLAGS,
@@ -4477,7 +3640,7 @@ sub B::AV::save {
   else {
     # 5.8: ARRAY fill max off nv MG STASH ALLOC arylen flags
     my $line = "0, -1, -1, 0, 0.0, 0, Nullhv, 0, 0";
-    $line = "0, $fill, $max, 0, 0.0, 0, Nullhv, 0, 0" if $B::C::av_init or $B::C::av_init2;
+    $line = "0, $fill, $fill, 0, 0.0, 0, Nullhv, 0, 0" if $B::C::av_init or $B::C::av_init2;
     $line .= sprintf( ", 0x%x", $av->AvFLAGS ) if $] < 5.009;
     #$avreal = $av->AvFLAGS & 1; # AVf_REAL
     $xpvavsect->add($line);
@@ -4485,14 +3648,14 @@ sub B::AV::save {
                          $xpvavsect->index, $av->REFCNT, $av->FLAGS));
   }
 
-  my ($magic, $av_index) = ('');
+  my ($av_index, $magic);
   if (!$ispadlist) {
-    $svsect->debug($fullname, $av->flagspv) if $debug{flags};
+    $svsect->debug($av->flagspv) if $debug{flags};
     my $sv_ix = $svsect->index;
     $av_index = $xpvavsect->index;
     # protect against recursive self-references (Getopt::Long)
     $sym = savesym( $av, "(AV*)&sv_list[$sv_ix]" );
-    $magic = $av->save_magic($fullname);
+    $magic = $av->save_magic;
   }
 
   if ( $debug{av} ) {
@@ -4511,9 +3674,9 @@ sub B::AV::save {
 	# if SvIOK print iv, POK pv
 	if ($el->can('FLAGS')) {
 	  $val = $el->IVX if $el->FLAGS & SVf_IOK;
-	  $val = cstring($el->PV) if $el->FLAGS & SVf_POK;
+	  $val = '"'.$el->PVX.'"' if $el->FLAGS & SVf_POK;
 	}
-        warn sprintf( "AV $av \[%d] = %s $val\n", $i++, class($el) );
+        warn sprintf( "AV 0x%x[%d] = %s 0x%x $val\n", $$av, $i++, class($el), $$el );
       }
     }
 
@@ -4533,15 +3696,8 @@ sub B::AV::save {
     # Init optimization by Nick Koston
     # The idea is to create loops so there is less C code. In the real world this seems
     # to reduce the memory usage ~ 3% and speed up startup time by about 8%.
-    my ($count, @values);
-    {
-      local $B::C::const_strings = $B::C::const_strings;
-      if ($PERL510 and !$ispadlist) { # force dynamic PADNAME strings
-        if ($] < 5.016) { $B::C::const_strings = 0 if $av->FLAGS & 0x40000000; }      # SVpad_NAME
-        else { $B::C::const_strings = 0 if ($av->FLAGS & 0x40008000 == 0x40008000); } # SVp_SCREAM|SVpbm_VALID
-      }
-      @values = map { $_->save($fullname."[".$count++."]") || () } @array;
-    }
+    my $count;
+    my @values = map { $_->save($fullname."[".$count++."]") || () } @array;
     $count = 0;
     for (my $i=0;$i<=$#array;$i++) {
       if ( $use_svpop_speedup
@@ -4586,7 +3742,7 @@ sub B::AV::save {
       $init->add("\tregister int gcount;") if $count;
       $init->add(
                  "\tPADLIST *padl = $sym;",
-                 sprintf("\tNewxz(svp, %d, PAD *);", $fill+1),
+                 "\tNewx(svp, $fill, PAD *);",
                  "\tPadlistARRAY(padl) = svp;",
                 );
       $init->add( substr( $acc, 0, -2 ) );
@@ -4652,9 +3808,11 @@ sub B::AV::save {
       my $fill1 = $fill < 3 ? 3 : $fill+1;
       $init->add("{", "\tSV **svp;");
       $init->add("\tregister int gcount;") if $count;
-      $init->add("\tAV *av = $sym;",
+      $init->add(
+                 "\tAV *av = $sym;",
                  "\tav_extend(av, $fill1);",
-                 "\tsvp = AvARRAY(av);");
+                 "\tsvp = AvARRAY(av);"
+                );
       $init->add( substr( $acc, 0, -2 ) );
       $init->add( "\tAvFILLp(av) = $fill;", "}" );
     }
@@ -4670,13 +3828,6 @@ sub B::AV::save {
     $init->add("av_extend($sym, $max);")
       if $max > -1;
   }
-
-  #XXX Not sure if this is really needed. gv_fetch should be smart enough
-  if (0 and $PERL510 and $fullname =~ /^(.*)::ISA$/) {
-    my $stashname = $1;
-    $init2->add( sprintf("mro_method_changed_in(GvHV(gv_fetchpv(%s, GV_NOTQUAL, SVt_PVHV)));",
-                         cstring($stashname.'::')));
-  }
   return $sym;
 }
 
@@ -4691,7 +3842,6 @@ sub B::HV::save {
   return $sym if defined $sym;
   my $name = $hv->NAME;
   my $is_stash = $name;
-  my $magic;
   if ($name) {
     # It's a stash. See issue 79 + test 46
     warn sprintf( "Saving stash HV \"%s\" from \"$fullname\" 0x%x MAX=%d\n",
@@ -4704,14 +3854,9 @@ sub B::HV::save {
     my $adpmroot = 0;
     $decl->add("Static HV *hv$hv_index;");
 
+    # Fix weird package names containing double-quotes, \n analog to gv_fetchpv
     my $cname = cstring($name);
-    my $len = length(pack "a*", $name); # not yet 0-byte safe. HEK len really
-    # TODO utf8 stashes
-    if ($name eq 'main') {
-      $init->add(qq[hv$hv_index = gv_stashpvn($cname, $len, 0);\t/* get main:: stash */]);
-    } else {
-      $init->add(qq[hv$hv_index = gv_stashpvn($cname, $len, GV_ADD);\t/* stash */]);
-    }
+    $init->add(qq[hv$hv_index = gv_stashpv($cname, TRUE);]);
     if ($adpmroot) {
       $init->add(sprintf( "HvPMROOT(hv$hv_index) = (PMOP*)s\\_%x;",
 			  $adpmroot ) );
@@ -4719,24 +3864,12 @@ sub B::HV::save {
     $sym = savesym( $hv, "hv$hv_index" );
     $hv_index++;
 
-    # issue 79, test 46: save stashes to check for packages.
+    # issue 79: save stashes to check for packages.
     # and via B::STASHGV we only save stashes for stashes.
     # For efficiency we skip most stash symbols unless -fstash.
     # However it should be now safe to save all stash symbols.
     # $fullname !~ /::$/ or
-    if (!$B::C::stash) { # -fno-stash: do not save stashes
-      $magic = $hv->save_magic('%'.$name.'::'); #symtab magic set in PMOP #188 (#267)
-      if ($PERL510 and mro::get_mro($name) eq 'c3') {
-        mark_package('mro', 1);
-      }
-      #if ($magic =~ /c/) {
-         # defer AMT magic of XS loaded hashes. #305 Encode::XS with tiehash magic
-      #  $init2->add(qq[$sym = gv_stashpvn($cname, $len, GV_ADDWARN|GV_ADDMULTI);]);
-      #}
-      return $sym;
-    }
-    return $sym if skip_pkg($name) or $name eq 'main';
-    $init->add( "SvREFCNT_inc($sym);" );
+    return $sym if !$B::C::stash or skip_pkg($name);
     warn "Saving stash keys for HV \"$name\" from \"$fullname\"\n" if $debug{hv};
   }
 
@@ -4753,22 +3886,20 @@ sub B::HV::save {
 			       0, $hv->MAX, 0 ));
     }
     $svsect->add(sprintf("&xpvhv_list[%d], %lu, 0x%x, {0}",
-			 $xpvhvsect->index, $hv->REFCNT,
-			 $hv->FLAGS & ~SVf_READONLY));
+			 $xpvhvsect->index, $hv->REFCNT, $hv->FLAGS & ~SVf_READONLY));
     # XXX failed at 16 (tied magic) for %main::
     if (!$is_stash and ($] >= 5.010 and $hv->FLAGS & SVf_OOK)) {
       $sym = sprintf("&sv_list[%d]", $svsect->index);
       my $hv_max = $hv->MAX + 1;
       # riter required, new _aux struct at the end of the HvARRAY. allocate ARRAY also.
       $init->add("{\tHE **a; struct xpvhv_aux *aux;",
-                 "#ifdef PERL_USE_LARGE_HV_ALLOC",
-                 sprintf("\tNewxz(a, PERL_HV_ARRAY_ALLOC_BYTES(%d) + sizeof(struct xpvhv_aux), HE*);",
-                         $hv_max),
-                 "#else",
-                 sprintf("\tNewxz(a, %d + sizeof(struct xpvhv_aux), HE*);", $hv_max),
-                 "#endif",
+		 sprintf("\tNewx(a, %d, HE*);", $hv_max+1),
 		 "\tHvARRAY($sym) = a;",
-		 sprintf("\tHvRITER_set($sym, %d);", $hv->RITER),"}");
+		 sprintf("\tZero(HvARRAY($sym), %d, HE*);", $hv_max+1),
+		 "\tNewx(aux, 1, struct xpvhv_aux);",
+		 sprintf("\tHvARRAY($sym)[%d] = (HE*)aux;", $hv_max),
+		 sprintf("\tHvRITER_set($sym, %d);", $hv->RITER),
+		 "\tHvEITER_set($sym, NULL); }");
     }
   } # !5.10
   else {
@@ -4778,22 +3909,20 @@ sub B::HV::save {
     $svsect->add(sprintf( "&xpvhv_list[%d], %lu, 0x%x",
 			  $xpvhvsect->index, $hv->REFCNT, $hv->FLAGS));
   }
-  $svsect->debug($fullname, $hv->flagspv) if $debug{flags};
+  $svsect->debug($hv->flagspv) if $debug{flags};
   my $sv_list_index = $svsect->index;
-  warn sprintf( "saving HV %".$fullname." &sv_list[$sv_list_index] 0x%x MAX=%d KEYS=%d\n",
-                $$hv, $hv->MAX, $hv->KEYS ) if $debug{hv};
-  # XXX B does not keep the UTF8 flag [RT 120535] #200
-  # shared heks only since 5.10, our fixed C.xs variant
-  my @contents = ($PERL510 && $hv->can('ARRAY_utf8')) ? $hv->ARRAY_utf8 : $hv->ARRAY;    # protect against recursive self-reference
+  warn sprintf( "saving HV $fullname &sv_list[$sv_list_index] 0x%x MAX=%d\n",
+                $$hv, $hv->MAX ) if $debug{hv};
+  my @contents     = $hv->ARRAY;
+  # protect against recursive self-reference
   # i.e. with use Moose at stash Class::MOP::Class::Immutable::Trait
   # value => rv => cv => ... => rv => same hash
   $sym = savesym( $hv, "(HV*)&sv_list[$sv_list_index]" ) unless $is_stash;
   if (@contents) {
-    local $B::C::const_strings = $B::C::const_strings;
     my ($i, $length);
     $length = scalar(@contents);
     for ( $i = 1 ; $i < @contents ; $i += 2 ) {
-      my $key = $contents[$i - 1]; # string only
+      my $key = $contents[$i - 1];
       my $sv = $contents[$i];
       warn sprintf("HV recursion? with $fullname\{$key\} -> %s\n", $sv->RV)
         if ref($sv) eq 'B::RV'
@@ -4812,12 +3941,8 @@ sub B::HV::save {
 	  # warn "(length=$length)\n" if $debug{hv};
 	}
       } else {
-	warn "saving HV \$".$fullname.'{'.$key."}\n" if $debug{hv};
+	warn "saving HV $fullname".'{'.$key."}\n" if $debug{hv};
 	$contents[$i] = $sv->save($fullname.'{'.$key.'}');
-	#if ($key eq "" and $] >= 5.010) {
-	#  warn "  turn off HvSHAREKEYS with empty keysv\n" if $debug{hv};
-	#  $init->add("HvSHAREKEYS_off(&sv_list[$sv_list_index]);");
-	#}
       }
     }
     if ($length) { # there may be skipped STASH symbols
@@ -4827,47 +3952,21 @@ sub B::HV::save {
       while (@contents) {
 	my ( $key, $value ) = splice( @contents, 0, 2 );
 	if ($value) {
-          $value = "(SV*)$value" if $value !~ /^&sv_list/ or ($PERL510 and $] < 5.012);
-          my $cur = length( pack "a*", $key );
-          if (!$PERL56) {
-            if (utf8::is_utf8($key)) {
-              my $pv = $key;
-              utf8::encode($pv);
-              $cur = 0 - length($pv);
-            }
-          }
-	  # issue 272: if SvIsCOW(sv) && SvLEN(sv) == 0 => sharedhek (key == "")
-	  # >= 5.10: SvSHARED_HASH: PV offset to hek_hash
-	  $init->add(sprintf( "\thv_store(hv, %s, %d, %s, %s);",
-			      cstring($key), $cur, $value, 0 )); # !! randomized hash keys
+	  $init->add(sprintf( "\thv_store(hv, %s, %u, %s, %s);",
+			      cstring($key), length( pack "a*", $key ),
+			      "(SV*)$value", 0 )); # !! randomized hash keys
 	  warn sprintf( "  HV key \"%s\" = %s\n", $key, $value) if $debug{hv};
-          if (!$swash_ToCf and $fullname =~ /^utf8::SWASHNEW/
-              and cstring($key) eq '"utf8\034unicore/To/Cf.pl\0340"' and $cur == 23)
-          {
-            $swash_ToCf = $value;
-            warn sprintf( "Found PL_utf8_tofold ToCf swash $value\n") if $verbose;
-          }
 	}
       }
       $init->add("}");
       $init->split;
-      $init->add( sprintf("HvTOTALKEYS($sym) = %d;", $length / 2)) if !$PERL56;
     }
   } elsif ($] >= 5.014) { # empty contents still needs to set keys=0
     # test 36, 140
     $init->add( "HvTOTALKEYS($sym) = 0;");
+    $init->add( "SvREADONLY_on($sym);") if $hv->FLAGS & SVf_READONLY;
   }
-  $magic = $hv->save_magic($fullname);
-  $init->add( "SvREADONLY_on($sym);") if $hv->FLAGS & SVf_READONLY;
-  if ($magic =~ /c/) {
-    # defer AMT magic of XS loaded hashes
-    my $cname = cstring($name);
-    my $len = length(pack "a*", $name); # not yet 0-byte safe. HEK len really
-    $init2->add(qq[$sym = gv_stashpvn($cname, $len, GV_ADDWARN|GV_ADDMULTI);]);
-  }
-  if ($PERL510 and $name and mro::get_mro($name) eq 'c3') {
-    mark_package('mro', 1);
-  }
+  $hv->save_magic($fullname);
   return $sym;
 }
 
@@ -4881,32 +3980,30 @@ sub B::IO::save_data {
 
   if ($PERL56) {
     # Pseudo FileHandle
-    $init->add_eval( sprintf 'open(%s, \'<\', $%s);', $globname, $globname );
+    $init->add_eval( sprintf 'open(%s, \'<\', $%s)', $globname, $globname );
   } else { # force inclusion of PerlIO::scalar as it was loaded in BEGIN.
-    $init->add_eval( sprintf 'open(%s, \'<:scalar\', $%s);', $globname, $globname );
-    # => eval_pv("open(main::DATA, '<:scalar', $main::DATA);",1); DATA being a ref to $data
-    $init->pre_destruct( sprintf 'eval_pv("close %s;", 1);', $globname );
+    $init->add_eval( sprintf 'open(%s, \'<:scalar\', $%s)', $globname, $globname );
+    # => eval_pv("open(main::DATA, '<:scalar', $main::DATA)",1); DATA being a ref to $data
     $use_xsloader = 1; # layers are not detected as XSUB CV, so force it
-    require PerlIO unless $savINC{'PerlIO.pm'};
-    require PerlIO::scalar unless $savINC{'PerlIO/scalar.pm'};
+    require PerlIO;
+    require PerlIO::scalar;
+    $savINC{'PerlIO.pm'} = $INC{'PerlIO.pm'};  # as it was loaded from BEGIN
     mark_package("PerlIO", 1);
-    $curINC{'PerlIO.pm'} = $INC{'PerlIO.pm'};  # as it was loaded from BEGIN
-    mark_package("PerlIO::scalar", 1);
-    $curINC{'PerlIO/scalar.pm'} = $INC{'PerlIO/scalar.pm'};
+    $savINC{'PerlIO/scalar.pm'} = $INC{'PerlIO/scalar.pm'};
     $xsub{'PerlIO::scalar'} = 'Dynamic-'.$INC{'PerlIO/scalar.pm'}; # force dl_init boot
+    mark_package("PerlIO::scalar", 1);
   }
 }
 
 sub B::IO::save {
-  my ($io, $fullname, $is_DATA) = @_;
+  my ($io, $fullname) = @_;
   my $sym = objsym($io);
   return $sym if defined $sym;
   my $pv = $io->PV;
   $pv = '' unless defined $pv;
   my ( $pvsym, $len, $cur );
   if ($pv) {
-    $pvsym = savepv($pv);
-    $cur = $io->CUR;
+    ( $pvsym, $cur ) = savepv($pv);
   } else {
     $pvsym = 'NULL';
     $cur = 0;
@@ -4917,9 +4014,8 @@ sub B::IO::save {
   } else {
     $len = 0;
   }
-  warn sprintf( "IO $fullname sv_list[%d] 0x%x (%s) = '%s'\n", $svsect->index+1, $$io, $io->SvTYPE, $pv )
-    if $debug{sv} and $] > 5.008; # no method "SvTYPE" via package "B::IO"
   if ($PERL514) {
+    warn sprintf( "IO 0x%x (%s) = '%s'\n", $$io, $io->SvTYPE, $pv ) if $debug{sv};
     # IFP in sv.sv_u.svu_fp
     $xpviosect->comment("STASH, xmg_u, cur, len, xiv_u, xio_ofp, xio_dirpu, page, page_len, ..., type, flags");
     my $tmpl = "Nullhv, /*STASH later*/\n\t{0}, /*MAGIC later*/\n\t%u, /*cur*/\n\t%u, /*len*/\n\t{%d}, /*LINES*/\n\t0, /*OFP later*/\n\t{0}, /*dirp_u later*/\n\t%d, /*PAGE*/\n\t%d, /*PAGE_LEN*/\n\t%d, /*LINES_LEFT*/\n\t%s, /*TOP_NAME*/\n\tNullgv, /*top_gv later*/\n\t%s, /*fmt_name*/\n\tNullgv, /*fmt_gv later*/\n\t%s, /*bottom_name*/\n\tNullgv, /*bottom_gv later*/\n\t%s, /*type*/\n\t0x%x /*flags*/";
@@ -4930,8 +4026,8 @@ sub B::IO::save {
         $cur,                     $len,
 	$io->LINES, 		  # moved to IVX with 5.11.1
         $io->PAGE,                $io->PAGE_LEN,
-        $io->LINES_LEFT,          "NULL",
-        "NULL",                   "NULL",
+        $io->LINES_LEFT,          cstring( $io->TOP_NAME ),
+        cstring( $io->FMT_NAME ), cstring( $io->BOTTOM_NAME ),
         cchar( $io->IoTYPE ),     $io->IoFLAGS
       )
     );
@@ -4940,6 +4036,7 @@ sub B::IO::save {
 			 $B::C::pv_copy_on_grow ? $pvsym : 0));
   }
   elsif ($] > 5.011000) {
+    warn sprintf( "IO 0x%x (%s) = '%s'\n", $$io, $io->SvTYPE, $pv ) if $debug{sv};
     $xpviosect->comment("xnv_u, cur, len, lines, xmg_u, xmg_stash, xio_ifp, xio_ofp, xio_dirpu, ..., type, flags");
     my $tmpl = "{0}, /*xnv_u*/\n\t%u, /*cur*/\n\t%u, /*len*/\n\t{%d}, /*LINES*/\n\t{0}, /*MAGIC later*/\n\t(HV*)NULL, /*STASH  later*/\n\t0, /*IFP later*/\n\t0, /*OFP later*/\n\t{0}, /*dirp_u later*/\n\t%d, /*PAGE*/\n\t%d, /*PAGE_LEN*/\n\t%d, /*LINES_LEFT*/\n\t%s, /*TOP_NAME*/\n\tNullgv, /*top_gv later*/\n\t%s, /*fmt_name*/\n\tNullgv, /*fmt_gv later*/\n\t%s, /*bottom_name*/\n\tNullgv, /*bottom_gv later*/\n\t%s, /*type*/\n\t0x%x /*flags*/";
     $tmpl =~ s{ /\*.+?\*/\n\t}{}g unless $verbose;
@@ -4949,8 +4046,8 @@ sub B::IO::save {
         $cur,                     $len,
 	$io->LINES, 		  # moved to IVX with 5.11.1
         $io->PAGE,                $io->PAGE_LEN,
-        $io->LINES_LEFT,          "NULL",
-        "NULL",                   "NULL",
+        $io->LINES_LEFT,          cstring( $io->TOP_NAME ),
+        cstring( $io->FMT_NAME ), cstring( $io->BOTTOM_NAME ),
         cchar( $io->IoTYPE ),     $io->IoFLAGS
       )
     );
@@ -4959,6 +4056,7 @@ sub B::IO::save {
 			 $B::C::pv_copy_on_grow ? $pvsym : 0));
   }
   elsif ($PERL510) {
+    warn sprintf( "IO 0x%x (%s) = '%s'\n", $$io, $io->SvTYPE, $pv ) if $debug{sv};
     $xpviosect->comment("xnv_u, cur, len, xiv_u, xmg_u, xmg_stash, xio_ifp, xio_ofp, xio_dirpu, lines, ..., type, flags");
     my $tmpl = "{0}, /*xnv_u*/\n\t%u, /*cur*/\n\t%u, /*len*/\n\t{%ld}, /*IVX*/\n\t{0}, /*MAGIC later*/\n\t(HV*)NULL, /*STASH  later*/\n\t0, /*IFP later*/\n\t0, /*OFP later*/\n\t{0}, /*dirp_u later*/\n\t%d, /*LINES*/\n\t%d, /*PAGE*/\n\t%d, /*PAGE_LEN*/\n\t%d, /*LINES_LEFT*/\n\t%s, /*TOP_NAME*/\n\tNullgv, /*top_gv later*/\n\t%s, /*fmt_name*/\n\tNullgv, /*fmt_gv later*/\n\t%s, /*bottom_name*/\n\tNullgv, /*bottom_gv later*/\n\t%s, /*type*/\n\t0x%x /*flags*/";
     $tmpl =~ s{ /\*[^\*]+?\*/\n\t}{}g unless $verbose;
@@ -4969,8 +4067,8 @@ sub B::IO::save {
         $io->IVX,
 	$io->LINES,
         $io->PAGE,                $io->PAGE_LEN,
-        $io->LINES_LEFT,          "NULL",
-        "NULL",                   "NULL",
+        $io->LINES_LEFT,          cstring( $io->TOP_NAME ),
+        cstring( $io->FMT_NAME ), cstring( $io->BOTTOM_NAME ),
         cchar( $io->IoTYPE ),     $io->IoFLAGS
       )
     );
@@ -4986,35 +4084,30 @@ sub B::IO::save {
               $io->IVX,                    $io->NVX,
               $io->LINES,                  $io->PAGE,
               $io->PAGE_LEN,               $io->LINES_LEFT,
-              "NULL",                      "NULL",
-              "NULL",                      $io->SUBPROCESS,
+              cstring( $io->TOP_NAME ),    cstring( $io->FMT_NAME ),
+              cstring( $io->BOTTOM_NAME ), $io->SUBPROCESS,
               cchar( $io->IoTYPE ),        $io->IoFLAGS
       )
     );
     $svsect->add(sprintf("&xpvio_list[%d], %lu, 0x%x",
                          $xpviosect->index, $io->REFCNT, $io->FLAGS));
   }
-  $svsect->debug($fullname, $io->flagspv) if $debug{flags};
+  $svsect->debug($io->flagspv) if $debug{flags};
   $sym = savesym( $io, sprintf( "(IO*)&sv_list[%d]", $svsect->index ) );
 
   if ($PERL510 and !$B::C::pv_copy_on_grow and $cur) {
     $init->add(sprintf("SvPVX(sv_list[%d]) = $pvsym;", $svsect->index));
   }
-  my ( $field );
+  my ( $field, $fsym );
   foreach $field (qw(TOP_GV FMT_GV BOTTOM_GV)) {
-    my $fsym = $io->$field();
+    $fsym = $io->$field();
     if ($$fsym) {
       $init->add( sprintf( "Io$field($sym) = (GV*)s\\_%x;", $$fsym ) );
       $fsym->save;
     }
   }
-  foreach $field (qw(TOP_NAME FMT_NAME BOTTOM_NAME)) {
-    my $fsym = $io->$field;
-    $init->add(sprintf("Io$field($sym) = savepvn(%s, %u);",
-                       cstring( $fsym ), length $fsym)) if $fsym;
-  }
   $io->save_magic($fullname); # This handle the stash also (we need to inc the refcnt)
-  if (!$PERL56 and !$is_DATA) { # PerlIO
+  if (!$PERL56 and $fullname ne 'main::DATA') { # PerlIO
     # deal with $x = *STDIN/STDOUT/STDERR{IO} and aliases
     my $perlio_func;
     # Note: all single-direction fp use IFP, just bi-directional pipes and
@@ -5026,7 +4119,7 @@ sub B::IO::save {
     # my $fd = IO::Handle::fileno($o);
     my $i = 0;
     foreach (qw(stdin stdout stderr)) {
-      if ($io->IsSTD($_) or (defined($fd) and $fd == -$i)) {
+      if ($io->IsSTD($_) or $fd == -$i) {
 	$perlio_func = $_;
       }
       $i++;
@@ -5067,13 +4160,11 @@ sub B::IO::save {
 			    $fd<3?'':'/*',$fd,cstring($mode),$fd<3?'':'*/'));
       }
       elsif ($iotype =~ /[<#\+]/) {
-        # skips warning if it's one of our PerlIO::scalar __DATA__ handles
 	warn "Warning: Read BEGIN-block $fullname from FileHandle $iotype \&$fd\n"
 	  if $fd >= 3 or $verbose; # need to setup it up before
 	$init->add("/* XXX WARNING: Read BEGIN-block $fullname from FileHandle */",
 		   "IoIFP($sym) = IoOFP($sym) = PerlIO_fdopen($fd, \"r\");");
-	my $tell;
-	if ($io->can("tell") and $tell = $io->tell()) {
+	if (my $tell = $o->tell()) {
 	  $init->add("PerlIO_seek(IoIFP($sym), $tell, SEEK_SET);")
 	}
       } else {
@@ -5114,11 +4205,12 @@ sub output_all {
   return if $check;
 
   my @sections = (
-    $copsect,    $opsect,     $unopsect,  $binopsect, $logopsect, $condopsect,
-    $listopsect, $pmopsect,   $svopsect,  $padopsect, $pvopsect,  $loopsect,
-    $xpvsect,    $xpvavsect,  $xpvhvsect, $xpvcvsect, $padlistsect,
-    $xpvivsect,  $xpvuvsect,  $xpvnvsect, $xpvmgsect, $xpvlvsect,
-    $xrvsect,    $xpvbmsect,  $xpviosect, $svsect
+    $opsect,     $unopsect,  $binopsect, $logopsect, $condopsect,
+    $listopsect, $pmopsect,  $svopsect,  $padopsect, $pvopsect,
+    $loopsect,   $copsect,   $svsect,    $xpvsect,
+    $xpvavsect,  $xpvhvsect, $xpvcvsect, $padlistsect,
+    $xpvivsect,  $xpvuvsect, $xpvnvsect, $xpvmgsect, $xpvlvsect,
+    $xrvsect,    $xpvbmsect,  $xpviosect,
   );
   printf "\t/* %s */", $symsect->comment if $symsect->comment and $verbose;
   $symsect->output( \*STDOUT, "#define %s\n" );
@@ -5129,7 +4221,9 @@ sub output_all {
     my $lines = $section->index + 1;
     if ($lines) {
       my $name = $section->name;
-      my $typename = $section->typename;
+      my $typename = ( $name eq "xpvcv" ) ? "XPVCV_or_similar" : uc($name);
+      # -fcog hack to statically initialize PVs (SVPV for 5.10-5.11 only)
+      $typename = 'SVPV' if $typename eq 'SV' and $PERL510 and $] < 5.012;
       print "Static $typename ${name}_list[$lines];\n";
     }
   }
@@ -5157,16 +4251,6 @@ sub output_all {
 #ifndef SvSTASH_set
 #  define SvSTASH_set(sv,hv) SvSTASH((sv)) = (hv)
 #endif
-#ifndef Newxz
-#  define Newxz(v,n,t) Newz(0,v,n,t)
-#endif
-EOT
-  }
-  if ($] < 5.008009 ) {
-    print <<'EOT';
-#ifndef SvREFCNT_inc_simple_NN
-#  define SvREFCNT_inc_simple_NN(sv)     (++SvREFCNT(sv), (SV*)(sv))
-#endif
 EOT
   }
   if ($] < 5.013007 ) {
@@ -5186,97 +4270,27 @@ EOT
 #endif
 EOT
   }
-  if (%init2_remap and !$HAVE_DLFCN_DLOPEN) {
-    print <<'EOT';
-XS(XS_DynaLoader_dl_load_file);
-XS(XS_DynaLoader_dl_find_symbol);
-EOT
-  }
   printf "\t/* %s */\n", $decl->comment if $decl->comment and $verbose;
   $decl->output( \*STDOUT, "%s\n" );
   print "\n";
-
   foreach $section (@sections) {
     my $lines = $section->index + 1;
     if ($lines) {
-      printf "Static %s %s_list[%u] = {\n", $section->typename, $section->name, $lines;
+      my $name = $section->name;
+      my $typename = ( $name eq "xpvcv" ) ? "XPVCV_or_similar" : uc($name);
+      $typename = 'SVPV' if $typename eq 'SV' and $PERL510 and $] < 5.012;
+      printf "Static %s %s_list[%u] = {\n", $typename, $name, $lines;
       printf "\t/* %s */\n", $section->comment
         if $section->comment and $verbose;
       $section->output( \*STDOUT, "\t{ %s }, /* %s_list[%d] %s */%s\n" );
       print "};\n\n";
     }
   }
-
-  fixup_ppaddr();
-  print "static int perl_init0(pTHX) /* fixup_ppaddr */
-{";
-  $init0->output( \*STDOUT, "\t%s\n" );
-  print "};\n\n";
-
+  my $init2_name = 'perl_init2';
+  printf "\t/* %s */\n", $init2->comment if $init2->comment and $verbose;
+  $init2->output( \*STDOUT, "\t%s\n", $init2_name );
   printf "\t/* %s */\n", $init->comment if $init->comment and $verbose;
   $init->output( \*STDOUT, "\t%s\n", $init_name );
-  my $init2_name = 'perl_init2';
-  printf "/* deferred init of XS/Dyna loaded modules */\n" if $verbose;
-  printf "/* %s */\n", $init2->comment if $init2->comment and $verbose;
-  my $remap = 0;
-  for my $pkg (sort keys %init2_remap) {
-    if (exists $xsub{$pkg}) { # check if not removed in between
-      my ($stashfile) = $xsub{$pkg} =~ /^Dynamic-(.+)$/;
-      # get so file from pm. Note: could switch prefix from vendor/site//
-      $init2_remap{$pkg}{FILE} = dl_module_to_sofile($pkg, $stashfile);
-      $remap++;
-    }
-  }
-  if ($remap) {
-    # XXX now emit arch-specific dlsym code
-    $init2->add("{","  void *handle, *ptr;");
-    if ($HAVE_DLFCN_DLOPEN) {
-      $init2->add("  #include <dlfcn.h>");
-    } else {
-      $init2->add("  dTARG; dSP;",
-                  "  targ=sv_newmortal();");
-    }
-    for my $pkg (sort keys %init2_remap) {
-      if (exists $xsub{$pkg}) {
-        if ($HAVE_DLFCN_DLOPEN) {
-          my $ldopt = 'RTLD_NOW|RTLD_NOLOAD';
-          $ldopt = 'RTLD_NOW' if $^O =~ /bsd/i; # 351 (only on solaris and linux, not any bsd)
-          $init2->add( sprintf("  handle = dlopen(%s,", cstring($init2_remap{$pkg}{FILE})),
-                               "                  $ldopt);",
-                               );
-        }
-        else {
-          $init2->add("  PUSHMARK(SP);",
-              sprintf("  XPUSHs(newSVpvs(%s));", cstring($init2_remap{$pkg}{FILE})),
-                      "  PUTBACK;",
-                      "  XS_DynaLoader_dl_load_file(aTHX);",
-                      "  SPAGAIN;",
-                      "  handle = INT2PTR(void*,POPi);",
-                      "  PUTBACK;",
-                     );
-        }
-        for my $mg (@{$init2_remap{$pkg}{MG}}) {
-          warn "init2 remap xpvmg_list[$mg->{ID}].xiv_iv to dlsym of $pkg\: $mg->{NAME}\n" if $verbose;
-          if ($HAVE_DLFCN_DLOPEN) {
-            $init2->add(sprintf("  ptr = dlsym(handle, %s);", cstring($mg->{NAME})));
-          } else {
-            $init2->add("  PUSHMARK(SP);",
-                        "  XPUSHi(PTR2IV(handle));",
-                sprintf("  XPUSHs(newSVpvs(%s));", cstring($mg->{NAME})),
-                        "  PUTBACK;",
-                        "  XS_DynaLoader_dl_find_symbol(aTHX);",
-                        "  SPAGAIN;",
-                        "  ptr = INT2PTR(void*,POPi);",
-                        "  PUTBACK;",
-                       );
-          }
-          $init2->add(sprintf("  xpvmg_list[%d].xiv_iv = PTR2IV(ptr);", $mg->{ID}));
-        }
-      }
-    }
-    $init2->add("}");
-  }
-  $init2->output( \*STDOUT, "\t%s\n", $init2_name );
   if ($verbose) {
     my $caller = caller;
     warn $caller eq 'B::CC' ? B::CC::compile_stats() : compile_stats();
@@ -5304,12 +4318,12 @@ sub output_declarations {
 #define sym_0 0
 EOT
 
-  # Tricky hack for -fcog since 5.10 on !c99 compilers required. We need a char* as
+  # Tricky hack for -fcog since 5.10 required. We need a char* as
   # *first* sv_u element to be able to statically initialize it. A int does not allow it.
   # gcc error: initializer element is not computable at load time
   # We introduce a SVPV as SV.
   # In core since 5.12
-  if ($PERL510 and $] < 5.012 and !$C99) {
+  if ($PERL510 and $] < 5.012) {
     print <<'EOT0';
 typedef struct svpv {
     void *	sv_any;
@@ -5354,17 +4368,67 @@ EOT0
     print "# define RX_EXTFLAGS(rx) ((rx)->extflags)\n";
     print "#endif\n";
   }
-  if ($] >= 5.021001) {
-    print "Static IV PL_sv_objcount; /* deprecated with 5.21.1 but still needed and used */\n";
-  }
   print "Static GV *gv_list[$gv_index];\n" if $gv_index;
+  if ($PERL510 and $^O eq 'MSWin32') {
+    # mingw and msvc does not export newGP
+    print << '__EOGP';
+
+#ifndef newGP
+PERL_CALLCONV GP * Perl_newGP(pTHX_ GV *const gv);
+
+GP *
+Perl_newGP(pTHX_ GV *const gv)
+{
+    GP *gp;
+    U32 hash;
+#ifdef USE_ITHREADS
+    const char *const file
+	= (PL_curcop && CopFILE(PL_curcop)) ? CopFILE(PL_curcop) : "";
+    const STRLEN len = strlen(file);
+#else
+    SV *const temp_sv = CopFILESV(PL_curcop);
+    const char *file;
+    STRLEN len;
+
+    PERL_ARGS_ASSERT_NEWGP;
+
+    if (temp_sv) {
+	file = SvPVX(temp_sv);
+	len = SvCUR(temp_sv);
+    } else {
+	file = "";
+	len = 0;
+    }
+#endif
+
+    PERL_HASH(hash, file, len);
+
+    Newxz(gp, 1, GP);
+
+#ifndef PERL_DONT_CREATE_GVSV
+    gp->gp_sv = newSV(0);
+#endif
+
+    gp->gp_line = PL_curcop ? CopLINE(PL_curcop) : 0;
+    /* XXX Ideally this cast would be replaced with a change to const char*
+       in the struct.  */
+    gp->gp_file_hek = share_hek(file, len, hash);
+    gp->gp_egv = gv;
+    gp->gp_refcnt = 1;
+
+    return gp;
+}
+#endif
+__EOGP
+
+  }
 
   # Need fresh re-hash of strtab. share_hek does not allow hash = 0
   if ( $PERL510 ) {
     print <<'_EOT0';
 HEK *my_share_hek( pTHX_ const char *str, I32 len, register U32 hash );
 #undef share_hek
-#define share_hek(str, len, hash) my_share_hek( aTHX_ str, len, hash );
+#define share_hek(str,len,hash) my_share_hek( aTHX_ str,len,hash );
 _EOT0
 
   }
@@ -5372,9 +4436,6 @@ _EOT0
 }
 
 sub output_boilerplate {
-  my $creator = "created at ".scalar localtime()." with B::C $B::C::VERSION";
-  $creator .= $B::C::REVISION if $B::C::REVISION;
-  print "/* $creator */\n";
   # Store the sv_list index in sv_debug_file when debugging
   print "#define DEBUG_LEAKING_SCALARS 1\n" if $debug{flags} and $DEBUG_LEAKING_SCALARS;
   if ($B::C::Flags::have_independent_comalloc) {
@@ -5389,6 +4450,9 @@ _EOT1
 #define PERL_CORE
 #include "EXTERN.h"
 #include "perl.h"
+#ifdef NO_DYNAMIC_LOADING
+# undef USE_DYNAMIC_LOADING
+#endif
 #include "XSUB.h"
 
 /* Workaround for mapstart: the only op which needs a different ppaddr */
@@ -5397,35 +4461,29 @@ _EOT1
 #undef OP_MAPSTART
 #define OP_MAPSTART OP_GREPSTART
 
-/* No longer available when C<PERL_CORE> is defined. */
-#ifndef Nullsv
-#  define Null(type) ((type)NULL)
-#  define Nullsv Null(SV*)
-#  define Nullhv Null(HV*)
-#  define Nullgv Null(GV*)
-#  define Nullop Null(OP*)
-#endif
-#ifndef GV_NOTQUAL
-#  define GV_NOTQUAL 0
-#endif
 /* Since 5.8.8 */
 #ifndef Newx
-#  define Newx(v,n,t)    New(0,v,n,t)
+#define Newx(v,n,t)    New(0,v,n,t)
 #endif
-_EOT2
+/* No longer available when C<PERL_CORE> is defined. */
+#ifndef Nullsv
+#define Null(type) ((type)NULL)
+#define Nullsv Null(SV*)
+#define Nullhv Null(HV*)
+#define Nullgv Null(GV*)
+#define Nullop Null(OP*)
+#endif
 
-  if ($] < 5.008008) {
-    print "#define GvSVn(s) GvSV(s)\n";
-  }
-
-  print <<'_EOT4';
 #define XS_DynaLoader_boot_DynaLoader boot_DynaLoader
 EXTERN_C void boot_DynaLoader (pTHX_ CV* cv);
 
 static void xs_init (pTHX);
 static void dl_init (pTHX);
-_EOT4
+_EOT2
 
+  if ($] < 5.008008) {
+    print "#define GvSVn(s) GvSV(s)\n";
+  }
   if ($B::C::av_init2 and $B::C::Flags::use_declare_independent_comalloc) {
     print "void** dlindependent_comalloc(size_t, size_t*, void**);\n";
   }
@@ -5451,10 +4509,72 @@ _EOT4
       $init->add_initav("    Perl_die(aTHX_ \"panic: AV alloc failed\");");
     }
   }
-  if ( !$B::C::destruct ) {
-    print <<'_EOT4';
+}
+
+sub init_op_addr {
+  my ( $op_type, $num ) = @_;
+  my $op_list = $op_type . "_list";
+
+  $init->add( split /\n/, <<_EOT3 );
+{
+    register int i;
+    for( i = 0; i < ${num}; ++i ) {
+        ${op_list}\[i].op_ppaddr = PL_ppaddr[PTR2IV(${op_list}\[i].op_ppaddr)];
+    }
+}
+_EOT3
+
+}
+
+sub init_op_warn {
+  my ( $op_type, $num ) = @_;
+  my $op_list = $op_type . "_list";
+
+  # for reasons beyond imagination, MSVC5 considers pWARN_ALL non-const
+  $init->add( split /\n/, <<_EOT4 );
+{
+    register int i;
+    for( i = 0; i < ${num}; ++i )
+    {
+        switch( PTR2IV(${op_list}\[i].cop_warnings) )
+        {
+        case 1:
+            ${op_list}\[i].cop_warnings = pWARN_ALL;
+            break;
+        case 2:
+            ${op_list}\[i].cop_warnings = pWARN_NONE;
+            break;
+        case 3:
+            ${op_list}\[i].cop_warnings = pWARN_STD;
+            break;
+        default:
+            break;
+        }
+    }
+}
+_EOT4
+
+}
+
+sub output_main_rest {
+
+  if ( $PERL510 ) {
+    print <<'_EOT5';
+HEK *
+my_share_hek( pTHX_ const char *str, I32 len, register U32 hash ) {
+    if (!hash) {
+      PERL_HASH(hash, str, len);
+    }
+    return Perl_share_hek(aTHX_ str, len, hash);
+}
+
+_EOT5
+  }
+
+  # -fno-destruct only >5.8
+  if ( !$B::C::destruct and $^O ne 'MSWin32') {
+    print <<'_EOT6';
 int fast_perl_destruct( PerlInterpreter *my_perl );
-static void my_curse( pTHX_ SV* const sv );
 
 #ifndef dVAR
 # ifdef PERL_GLOBAL_STRUCT
@@ -5463,165 +4583,6 @@ static void my_curse( pTHX_ SV* const sv );
 #  define dVAR		dNOOP
 # endif
 #endif
-_EOT4
-
-  } else {
-    print <<'_EOT5';
-int my_perl_destruct( PerlInterpreter *my_perl );
-_EOT5
-
-  }
-  if ($] < 5.008009) {
-    print <<'_EOT3';
-#ifndef savesharedpvn
-char *savesharedpvn(const char *const s, const STRLEN len);
-#endif
-_EOT3
-
-  }
-}
-
-sub init_op_addr {
-  my ( $op_type, $num ) = @_;
-  my $op_list = $op_type . "_list";
-
-  $init0->add( split /\n/, <<_EOT6 );
-{
-    register int i;
-    for( i = 0; i < ${num}; ++i ) {
-        ${op_list}\[i].op_ppaddr = PL_ppaddr[PTR2IV(${op_list}\[i].op_ppaddr)];
-    }
-}
-_EOT6
-
-}
-
-sub output_main_rest {
-
-  if ( $PERL510 ) {
-    print <<'_EOT7';
-HEK *
-my_share_hek( pTHX_ const char *str, I32 len, register U32 hash ) {
-    if (!hash) {
-      PERL_HASH(hash, str, abs(len));
-    }
-    return Perl_share_hek(aTHX_ str, len, hash);
-}
-
-_EOT7
-  }
-
-  if ($] < 5.008009) {
-    print <<'_EOT7a';
-#ifndef savesharedpvn
-char *savesharedpvn(const char *const s, const STRLEN len) {
-  char *const d = (char*)PerlMemShared_malloc(len + 1);
-  if (!d) { exit(1); }
-  d[len] = '\0';
-  return (char *)memcpy(d, s, len);
-}
-#endif
-_EOT7a
-
-  }
-  # -fno-destruct only >=5.8
-  if ( !$B::C::destruct ) {
-    print <<'_EOT8';
-
-#ifndef SvDESTROYABLE
-#define SvDESTROYABLE(sv) 1
-#endif
-/* 5.8 */
-#ifndef CvISXSUB
-#define CvISXSUB(sv) CvXSUB(sv)
-#endif
-#ifndef SvRV_set
-#define SvRV_set(a,b) SvRV(a) = (b)
-#endif
-/* 5.6 */
-#ifndef PERL_EXIT_DESTRUCT_END
-#define PERL_EXIT_DESTRUCT_END 2
-#endif
-
-static void
-my_curse( pTHX_ SV* const sv ) {
-    dSP;
-    dVAR;
-    HV* stash;
-
-#if PERL_VERSION > 7
-    assert(SvOBJECT(sv));
-    do {
-        stash = SvSTASH(sv);
-        assert(SvTYPE(stash) == SVt_PVHV);
-	if (HvNAME(stash)) {
-	    CV* destructor = NULL;
-	    if (!SvOBJECT(stash)) destructor = (CV *)SvSTASH(stash);
-	    if (!destructor
-#if (PERL_VERSION > 18) || (PERL_VERSION == 18 && PERL_SUBVERSION > 1)
-                || HvMROMETA(stash)->destroy_gen != PL_sub_generation
-#endif
-	    ) {
-		GV * const gv = gv_fetchmeth_autoload(stash, "DESTROY", 7, 0);
-		if (gv) destructor = GvCV(gv);
-		if (!SvOBJECT(stash))
-		{
-		    SvSTASH(stash) =
-			destructor ? (HV *)destructor : ((HV *)0)+1;
-#if (PERL_VERSION > 18) || (PERL_VERSION == 18 && PERL_SUBVERSION > 1)
-		    HvAUX(stash)->xhv_mro_meta->destroy_gen = PL_sub_generation;
-#endif
-		}
-	    }
-	    assert(!destructor || destructor == ((CV *)0)+1
-		   || SvTYPE(destructor) == SVt_PVCV);
-	    if (destructor && destructor != ((CV *)0)+1
-		/* A constant subroutine can have no side effects, so
-		   don't bother calling it.  */
-		&& !CvCONST(destructor)
-		/* Don't bother calling an empty destructor or one that
-		   returns immediately. */
-		&& (CvISXSUB(destructor)
-		|| (CvSTART(destructor)
-		    && (CvSTART(destructor)->op_next->op_type != OP_LEAVESUB)
-		    && (CvSTART(destructor)->op_next->op_type != OP_PUSHMARK
-			|| CvSTART(destructor)->op_next->op_next->op_type != OP_RETURN
-		       )
-		   ))
-	       )
-	    {
-		SV* const tmpref = newRV(sv);
-		DEBUG_D(PerlIO_printf(Perl_debug_log, "Calling %s::DESTROY\n", HvNAME(stash)));
-		SvREADONLY_on(tmpref); /* DESTROY() could be naughty */
-		ENTER;
-		PUSHSTACKi(PERLSI_DESTROY);
-		EXTEND(SP, 2);
-		PUSHMARK(SP);
-		PUSHs(tmpref);
-		PUTBACK;
-		call_sv((SV*)destructor, G_DISCARD|G_EVAL|G_KEEPERR|G_VOID);
-		POPSTACK;
-		SPAGAIN;
-		LEAVE;
-		if(SvREFCNT(tmpref) < 2) {
-		    /* tmpref is not kept alive! */
-		    SvREFCNT(sv)--;
-		    SvRV_set(tmpref, NULL);
-		    SvROK_off(tmpref);
-		}
-		SvREFCNT_dec(tmpref);
-	    }
-	}
-    } while (SvOBJECT(sv) && SvSTASH(sv) != stash);
-
-    if (SvOBJECT(sv)) {
-	/* Curse before freeing the stash, as freeing the stash could cause
-	   a recursive call into S_curse. */
-	SvOBJECT_off(sv);	/* Curse the object. */
-	SvSTASH_set(sv,0);	/* SvREFCNT_dec may try to read this */
-    }
-#endif
-}
 
 int fast_perl_destruct( PerlInterpreter *my_perl ) {
     dVAR;
@@ -5649,13 +4610,8 @@ int fast_perl_destruct( PerlInterpreter *my_perl ) {
 	const char * const s = PerlEnv_getenv("PERL_DESTRUCT_LEVEL");
 	if (s) {
             const int i = atoi(s);
-#ifdef DEBUGGING
-	    if (destruct_level < i) destruct_level = i;
-#endif
-#ifdef PERL_TRACK_MEMPOOL
-            /* RT #114496, for perl_free */
-            PL_perl_destruct_level = i;
-#endif
+	    if (destruct_level < i)
+		destruct_level = i;
 	}
     }
 #endif
@@ -5665,12 +4621,9 @@ int fast_perl_destruct( PerlInterpreter *my_perl ) {
         int x = 0;
 
         JMPENV_PUSH(x);
-        if (PL_endav && !PL_minus_c) {
-#if PERL_VERSION > 13
-	    PL_phase = PERL_PHASE_END;
-#endif
+	PERL_UNUSED_VAR(x);
+        if (PL_endav && !PL_minus_c)
             call_list(PL_scopestack_ix, PL_endav);
-        }
         JMPENV_POP;
     }
     LEAVE;
@@ -5679,15 +4632,10 @@ int fast_perl_destruct( PerlInterpreter *my_perl ) {
 
     /* Need to flush since END blocks can produce output */
     my_fflush_all();
-
-    PL_main_start = NULL;
-    PL_main_cv = NULL;
-    PL_curcop = &PL_compiling;
-#if PERL_VERSION >= 13
+#if PERL_VERSION >= 11 && defined(PERL_PHASE_DESTRUCT)
     PL_phase = PERL_PHASE_DESTRUCT;
 #endif
 
-#if PERL_VERSION > 7
     if (PL_threadhook(aTHX)) {
         /* Threads hook has vetoed further cleanup */
 #if (PERL_VERSION > 8) || ((PERL_VERSION == 8) && (PERL_SUBVERSION > 8))
@@ -5698,85 +4646,34 @@ int fast_perl_destruct( PerlInterpreter *my_perl ) {
 #endif
     }
     PerlIO_destruct(aTHX);
-
-    /* B::C -O3 specific: first curse (i.e. call DESTROY) all our static SVs */
-    if (PL_sv_objcount) {
-        int i = 1;
-        DEBUG_D(PerlIO_printf(Perl_debug_log, "\nCursing named global static sv_arena:\n"));
-        PL_in_clean_all = 1;
-        for (; i < SvREFCNT(&sv_list[0]); i++) {
-            SV *sv = &sv_list[i];
-            if (SvREFCNT(sv)) {
-#if PERL_VERSION > 11
-                if (SvTYPE(sv) == SVt_IV && SvROK(sv))
-#else
-                if (SvTYPE(sv) == SVt_RV)
-#endif
-                    sv = SvRV(sv);
-                if (sv && SvOBJECT(sv) && SvTYPE(sv) >= SVt_PVMG && SvSTASH(sv)
-                    && SvTYPE(sv) != SVt_PVCV && SvTYPE(sv) != SVt_PVIO
-                    && PL_defstash /* Still have a symbol table? */
-                    && SvDESTROYABLE(sv))
-                {
-	            SvREFCNT(sv) = 0;
-                    my_curse(aTHX_ sv);
-                }
-            }
-        }
-    }
-    if (DEBUG_D_TEST) {
-        SV* sva;
-        PerlIO_printf(Perl_debug_log, "\n");
-        for (sva = PL_sv_arenaroot; sva; sva = (SV*)SvANY(sva)) {
-            PerlIO_printf(Perl_debug_log, "sv_arena: 0x%p - 0x%p (%u)\n",
-              sva, sva+SvREFCNT(sva), SvREFCNT(sva));
-        }
-    }
-#endif
-
-    if (PL_sv_objcount) {
-	PL_in_clean_all = 1;
-	sv_clean_objs(); /* and now curse the rest */
-	PL_sv_objcount = 0;
-    }
-    PL_warnhook = NULL;
-    PL_diehook = NULL;
-    /* call exit list functions */
-    while (PL_exitlistlen-- > 0)
-	PL_exitlist[PL_exitlistlen].fn(aTHX_ PL_exitlist[PL_exitlistlen].ptr);
-    PL_exitlist = NULL;
-
 #if defined(PERLIO_LAYERS)
     PerlIO_cleanup(aTHX);
 #endif
     return 0;
 }
-_EOT8
+_EOT6
 
   }
   # special COW handling for 5.10 because of S_unshare_hek_or_pvn limitations
   # XXX This fails in S_doeval SAVEFREEOP(PL_eval_root): test 15
-  # if ( $PERL510 and (@B::C::static_free or $free->index > -1))
-  else {
+  elsif ( $PERL510 and (@static_free or $free->index > -1)) {
     print <<'_EOT7';
+int my_perl_destruct( PerlInterpreter *my_perl );
 int my_perl_destruct( PerlInterpreter *my_perl ) {
-    /* set all our static pv and hek to &PL_sv_undef for perl_destruct() */
+    /* set all our static pv and hek to &PL_sv_undef so perl_destruct() will not cry */
 _EOT7
 
-    for (0 .. $#B::C::static_free) {
+    for (0 .. $#static_free) {
       # set the sv/xpv to &PL_sv_undef, not the pv itself. 
       # If set to NULL pad_undef will fail in SvPVX_const(namesv) == '&'
       # XXX Another idea >5.10 is SvFLAGS(pv) = SVTYPEMASK
-      my $s = $B::C::static_free[$_];
+      my $s = $static_free[$_];
       if ($s =~ /^sv_list\[\d+\]\./) { # pv directly (unused)
 	print "    $s = NULL;\n";
       } elsif ($s =~ /^sv_list/) {
-       print "    SvLEN(&$s) = 0;\n";
        print "    SvPV_set(&$s, (char*)&PL_sv_undef);\n";
       } elsif ($s =~ /^&sv_list/) {
-       print "    SvLEN($s) = 0;\n";
        print "    SvPV_set($s, (char*)&PL_sv_undef);\n";
-      # dead code ---
       } elsif ($s =~ /^cop_list/) {
 	if ($ITHREADS or !$MULTI) {
 	  print "    CopFILE_set(&$s, NULL);";
@@ -5790,35 +4687,12 @@ _EOT7
         } else { # 5.16 experiment
           print " CopSTASHPV_set(&$s, NULL, 0);\n";
         }
-      # end dead code ---
-      #} elsif ($s =~ /^pv\d/) {
-      #	print "    $s = \"\";\n";
       } elsif ($s ne 'ptr_undef') {
-	warn("unknown $s at \@static_free[$_]");
+	warn("unknown static_free: $s at index $_");
       }
     }
     $free->output( \*STDOUT, "%s\n" );
-    print <<'_EOT7a';
-
-    /* B::C specific: prepend static svs to arena for sv_clean_objs */
-    SvANY(&sv_list[0]) = (void *)PL_sv_arenaroot;
-    PL_sv_arenaroot = &sv_list[0];
-#if PERL_VERSION > 7
-    if (DEBUG_D_TEST) {
-        SV* sva;
-        PerlIO_printf(Perl_debug_log, "\n");
-        for (sva = PL_sv_arenaroot; sva; sva = (SV*)SvANY(sva)) {
-            PerlIO_printf(Perl_debug_log, "sv_arena: 0x%p - 0x%p (%u)\n",
-              sva, sva+SvREFCNT(sva), SvREFCNT(sva));
-        }
-    }
-    return perl_destruct( my_perl );
-#else
-    perl_destruct( my_perl );
-    return 0;
-#endif
-}
-_EOT7a
+    print "\n    return perl_destruct( my_perl );\n}\n\n";
   }
 
   print <<'_EOT8';
@@ -5843,7 +4717,7 @@ _EOT8
   print("/* XS bootstrapping code*/\n");
   print("\tSAVETMPS;\n");
   print("\ttarg=sv_newmortal();\n");
-  foreach my $stashname ( sort keys %static_ext ) {
+  foreach my $stashname ( keys %static_ext ) {
     my $stashxsub = $stashname;
     $stashxsub =~ s/::/__/g;
     #if ($stashxsub =~ m/\/(\w+)\.\w+$/ {$stashxsub = $1;}
@@ -5861,11 +4735,10 @@ _EOT8
   print "#endif\n";
 
   # my %core = map{$_ => 1} core_packages();
-  foreach my $stashname ( sort keys %xsub ) {
+  foreach my $stashname ( keys %xsub ) {
     my $incpack = inc_packname($stashname);
-    unless (exists $curINC{$incpack}) { # skip deleted packages
+    unless (exists $INC{$incpack}) { # skip deleted packages
       warn "skip xs_init for $stashname !\$INC{$incpack}\n" if $debug{pkg};
-      delete $include_package{$stashname};
       delete $xsub{$stashname} unless $static_ext{$stashname};
       next;
     }
@@ -5909,34 +4782,18 @@ _EOT9
       # XXX Be sure to store the new @dl_modules
     }
   }
-  for my $c (sort keys %skip_package) {
+  for my $c (keys %skip_package) {
     warn "no dl_init for $c, skipped\n" if $verbose and $xsub{$c};
     delete $xsub{$c};
     $include_package{$c} = undef;
     @dl_modules = grep { $_ ne $c } @dl_modules;
   }
   @DynaLoader::dl_modules = @dl_modules;
-  warn "\@dl_modules: ",join(" ",@dl_modules),"\n" if $verbose;
   foreach my $stashname (@dl_modules) {
     my $incpack = inc_packname($stashname);
-    #unless (exists $INC{$incpack}) { # skip deleted packages
-    #  warn "XXX skip dl_init for $stashname !\$INC{$incpack}\n" if $debug{pkg};
+    unless (exists $INC{$incpack}) { # skip deleted packages
+      warn "XXX skip dl_init for $stashname !\$INC{$incpack}\n" if $debug{pkg};
     #  delete $xsub{$stashname};
-    #  @dl_modules = grep { $_ ne $stashname } @dl_modules;
-    #}
-    if ($stashname eq 'attributes' and $] > 5.011) {
-      $xsub{$stashname} = 'Dynamic-' . $INC{'attributes.pm'};
-    }
-    # actually boot all non-b-c dependent modules here. we assume XSLoader (Moose, List::MoreUtils)
-    if (!exists( $xsub{$stashname} ) and $include_package{$stashname}) {
-      $xsub{$stashname} = 'Dynamic-' . $INC{$incpack};
-      # Class::MOP without Moose: find Moose.pm
-      $xsub{$stashname} = 'Dynamic-' . $savINC{$incpack} unless $INC{$incpack};
-      if (!$savINC{$incpack}) {
-        eval "require $stashname;";
-        $xsub{$stashname} = 'Dynamic-' . $INC{$incpack};
-      }
-      warn "Assuming xs loaded $stashname with $xsub{$stashname}\n" if $verbose;
     }
     if ( exists( $xsub{$stashname} ) && $xsub{$stashname} =~ m/^Dynamic/ ) {
       # XSLoader.pm: $modlibname = (caller())[1]; needs a path at caller[1] to find auto,
@@ -5945,22 +4802,8 @@ _EOT9
       $dl++;
     }
   }
-  warn "\%xsub: ",join(" ",sort keys %xsub),"\n" if $verbose and $debug{cv};
-  # XXX Adding DynaLoader is too late here! The sections like $init are already dumped (#125)
-  if ($dl and ! $curINC{'DynaLoader.pm'}) {
-    die "Error: DynaLoader required but not dumped. Too late to add it.\n";
-  } elsif ($xs and ! $curINC{'XSLoader.pm'}) {
-    die "Error: XSLoader required but not dumped. Too late to add it.\n";
-  }
+  force_saving_xsloader() if $use_xsloader and ($dl or $xs);
   if ($dl) {
-    # enforce attributes at the front of dl_init, #259
-    # also Encode should be booted before PerlIO::encoding
-    for my $front (qw(Encode attributes)) {
-      if (grep { $_ eq $front } @dl_modules) {
-        @dl_modules = grep { $_ ne $front } @dl_modules;
-        unshift @dl_modules, $front;
-      }
-    }
     if ($staticxs) {open( XS, ">", $outfile.".lst" ) or return "$outfile.lst: $!\n"}
     print "\tdTARG; dSP;\n";
     print "/* DynaLoader bootstrapping */\n";
@@ -5969,67 +4812,40 @@ _EOT9
     print "\t/* assert(cxstack_ix == 0); */\n" if $xs;
     print "\tSAVETMPS;\n";
     print "\ttarg = sv_newmortal();\n" if $] < 5.008008;
-
-    if (exists $xsub{"Coro::State"} and grep { $_ eq "Coro::State" } @dl_modules) {
-      # Coro readonly symbols in BOOT (#293)
-      # needed before dl_init, and after init
-      print "\t{\n\t  GV *sym;\n";
-      for my $s (qw(Coro Coro::API Coro::current)) {
-        print "\t  sym = gv_fetchpv(\"$s\",0,SVt_PV);\n";
-        print "\t  if (sym && GvSVn(sym)) SvREADONLY_off(GvSVn(sym));\n";
-      }
-      print "\t  sym = gv_fetchpv(\"Coro::pool_handler)\",0,SVt_PVCV);\n";
-      print "\t  if (sym && GvCV(sym)) SvREADONLY_off(GvCV(sym));\n";
-      print "\t}\n";
-    }
-    if (exists $xsub{"EV"} and grep { $_ eq "EV" } @dl_modules) {
-      # EV readonly symbols in BOOT (#368)
-      print "\t{\n\t  GV *sym;\n";
-      for my $s (qw(EV::API)) {
-        print "\t  sym = gv_fetchpv(\"$s\",0,SVt_PV);\n";
-        print "\t  if (sym && GvSVn(sym)) SvREADONLY_off(GvSVn(sym));\n";
-      }
-      print "\t}\n";
-    }
     foreach my $stashname (@dl_modules) {
       if ( exists( $xsub{$stashname} ) && $xsub{$stashname} =~ m/^Dynamic/ ) {
 	$use_xsloader = 1;
-        print "\n\tPUSHMARK(sp);\n";
+        warn "dl_init $stashname\n" if $verbose;
+        print "\tPUSHMARK(sp);\n";
 	# XXX -O1 or -O2 needs XPUSHs with dynamic pv
 	printf "\t%s(%s, %d);\n", # "::bootstrap" gets appended
 	  $] < 5.008008 ? "XPUSHp" : "mXPUSHp", "\"$stashname\"", length($stashname);
         if ( $xsub{$stashname} eq 'Dynamic' ) {
-          no strict 'refs';
-          warn "dl_init $stashname\n" if $verbose;
-          # just in case we missed it. DynaLoader really needs the @ISA (#308)
-          B::svref_2object( \@{$stashname."::ISA"} ) ->save;
-	  print "#ifndef STATICXS\n";
+	  print "#ifdef USE_DYNAMIC_LOADING\n";
 	  print "\tPUTBACK;\n";
           print qq/\tcall_method("DynaLoader::bootstrap_inherit", G_VOID|G_DISCARD);\n/;
         }
         else { # XS: need to fix cx for caller[1] to find auto/...
 	  my ($stashfile) = $xsub{$stashname} =~ /^Dynamic-(.+)$/;
-	  print "#ifndef STATICXS\n";
+	  print "#ifdef USE_DYNAMIC_LOADING\n";
 	  if ($] >= 5.015003) {
 	    printf "\tmXPUSHp(\"%s\", %d);\n", $stashfile, length($stashfile) if $stashfile;
 	  }
 	  print "\tPUTBACK;\n";
-	  warn "bootstrapping $stashname added to XSLoader dl_init\n" if $verbose;
+	  warn "bootstrapping $stashname added to dl_init\n" if $verbose;
 	  # XSLoader has the 2nd insanest API in whole Perl, right after make_warnings_object()
 	  # 5.15.3 workaround for [perl #101336]
 	  if ($] >= 5.015003) {
 	    no strict 'refs';
-	    unless (grep /^DynaLoader$/, get_isa($stashname)) {
+	    unless (grep /^DynaLoader$/, @{$stashname."::ISA"}) {
 	      push @{$stashname."::ISA"}, 'DynaLoader';
-	      svref_2object( \@{$stashname."::ISA"} ) ->save;
+	      B::svref_2object( \@{$stashname."::ISA"} ) ->save;
 	    }
 	    warn '@',$stashname,"::ISA=(",join(",",@{$stashname."::ISA"}),")\n" if $debug{gv};
-            # TODO #364: if a VERSION was provided need to add it here
 	    print qq/\tcall_pv("XSLoader::load_file", G_VOID|G_DISCARD);\n/;
 	  } else {
 	    printf qq/\tCopFILE_set(cxstack[cxstack_ix].blk_oldcop, "%s");\n/,
 	      $stashfile if $stashfile;
-            # TODO #364: if a VERSION was provided need to add it here
 	    print qq/\tcall_pv("XSLoader::load", G_VOID|G_DISCARD);\n/;
 	  }
         }
@@ -6059,7 +4875,7 @@ _EOT9
         $stashxsub =~ s/::/__/g;
         if ($staticxs) {
 	  # CvSTASH(CvGV(cv)) is invalid without (issue 86)
-	  print "\tboot_$stashxsub(aTHX_ get_cv(\"$stashname\::bootstrap\", GV_ADD));\n";
+	  print "\tboot_$stashxsub(aTHX_ get_cv(\"$stashname\::bootstrap\", TRUE));\n";
 	} else {
 	  print "\tboot_$stashxsub(aTHX_ NULL);\n";
 	}
@@ -6068,7 +4884,7 @@ _EOT9
         #print "\tPUTBACK;\n";
       } else {
         warn "no dl_init for $stashname, ".
-          (!$xsub{$stashname} ? "not bootstrapped\n" : "bootstrapped as $xsub{$stashname}\n")
+          (!$xsub{$stashname} ? "not marked\n" : "marked as $xsub{$stashname}\n")
 	    if $verbose;
 	# XXX Too late. This might fool run-time DynaLoading.
 	# We really should remove this via init from @DynaLoader::dl_modules
@@ -6100,6 +4916,8 @@ main(int argc, char **argv, char **env)
     int exitstatus;
     int i;
     char **fakeargv;
+    GV* tmpgv;
+    SV* tmpsv;
     int options_count;
     PerlInterpreter *my_perl;
 
@@ -6116,6 +4934,7 @@ main(int argc, char **argv, char **env)
 	PL_perl_destruct_level = 0;
     }
 _EOT10
+
     if ($ITHREADS and $] > 5.007) {
       # XXX init free elems!
       my $pad_len = regex_padav->FILL;    # first is an empty avref
@@ -6139,14 +4958,7 @@ _EOT10
 _EOT11
 
     }
-    print "    PL_exit_flags |= PERL_EXIT_DESTRUCT_END;\n" unless $PERL56;
-    if ($] >= 5.008009) {
-      print <<'_SAFE_PUTENV';
-#ifndef PERL_USE_SAFE_PUTENV
-    PL_use_safe_putenv = 0;
-#endif
-_SAFE_PUTENV
-    }
+
     if (!$PERL510) {
       print <<'_EOT12';
 #if defined(CSH)
@@ -6196,55 +5008,39 @@ _EOT14
 _EOT15
 
     if ($use_perl_script_name) {
-      my $dollar_0 = cstring($0);
-      print sprintf(qq{    sv_setpv_mg(get_sv("0", GV_ADD|GV_NOTQUAL), %s);\n}, $dollar_0);
-      print sprintf(qq{    CopFILE_set(&PL_compiling, %s);\n}, $dollar_0);
+      my $dollar_0 = $0;
+      $dollar_0 =~ s/\\/\\\\/g;
+      $dollar_0 = '"' . $dollar_0 . '"';
+
+      print <<"EOT";
+    if ((tmpgv = gv_fetchpv("0", TRUE, SVt_PV))) {/* $0 */
+        tmpsv = GvSVn(tmpgv);
+        sv_setpv(tmpsv, ${dollar_0});
+        SvSETMAGIC(tmpsv);
+    }
+EOT
+
     }
     else {
-      #print q{    warn("PL_origalen=%d\n", PL_origalen);},"\n";
-      print qq{    sv_setpv_mg(get_sv("0", GV_ADD|GV_NOTQUAL), argv[0]);\n};
-      print qq{    CopFILE_set(&PL_compiling, argv[0]);\n};
+      print <<"EOT";
+    if ((tmpgv = gv_fetchpv("0", TRUE, SVt_PV))) {/* $0 */
+        tmpsv = GvSVn(tmpgv);
+        sv_setpv(tmpsv, argv[0]);
+        SvSETMAGIC(tmpsv);
+        CopFILE_set(&PL_compiling, argv[0]);
     }
-    # more global vars
-    print "    PL_hints = $^H;\n" if $^H;
-    print "    PL_unicode = ${^UNICODE};\n" if ${^UNICODE};
-    # nomg
-    print sprintf(qq{    sv_setpv(get_sv(";", GV_ADD|GV_NOTQUAL), %s);\n}, cstring($;)) if $; ne "\34";
-    print sprintf(qq{    sv_setpv(get_sv("\\"", GV_NOTQUAL), %s); /* \$" */\n}, cstring($")) if $" ne " ";
-    # global IO vars
-    if ($PERL56) {
-      print sprintf(qq{    PL_ofs = %s; PL_ofslen = %u; /* \$, */\n}, cstring($,), length $,) if $,;
-      print sprintf(qq{    PL_ors = %s; PL_orslen = %u; /* \$\\ */\n}, cstring($\), length $\) if $\;
-    } else {
-      print sprintf(qq{    sv_setpv_mg(GvSVn(PL_ofsgv), %s); /* \$, */\n}, cstring($,)) if $,;
-      print sprintf(qq{    sv_setpv_mg(get_sv("\\\\", GV_ADD|GV_NOTQUAL), %s); /* \$\\ */\n}, cstring($\)) if $\; #ORS
-    }
-    print sprintf(qq{    sv_setpv_mg(get_sv("/", GV_NOTQUAL), %s);\n}, cstring($/)) if $/ ne "\n"; #RS
-    print         qq{    sv_setiv_mg(get_sv("|", GV_ADD|GV_NOTQUAL), $|);\n} if $|; #OUTPUT_AUTOFLUSH
-    # global format vars
-    print sprintf(qq{    sv_setpv_mg(get_sv("^A", GV_ADD|GV_NOTQUAL), %s);\n}, cstring($^A)) if $^A; #ACCUMULATOR
-    print sprintf(qq{    sv_setpv_mg(get_sv("^L", GV_ADD|GV_NOTQUAL), %s);\n}, cstring($^L)) if $^L ne "\f"; #FORMFEED
-    print sprintf(qq{    sv_setpv_mg(get_sv(":", GV_ADD|GV_NOTQUAL), %s);\n}, cstring($:)) if $: ne " \n-"; #LINE_BREAK_CHARACTERS
-    print sprintf(qq/    sv_setpv_mg(get_sv("^", GV_ADD|GV_NOTQUAL), savepvn(%s, %u));\n/, cstring($^), length($^))
-      if $^ ne "STDOUT_TOP";
-    print sprintf(qq/    sv_setpv_mg(get_sv("~", GV_ADD|GV_NOTQUAL), savepvn(%s, %u));\n/, cstring($~), length($~))
-      if $~ ne "STDOUT";
-    print         qq{    sv_setiv_mg(get_sv("%", GV_ADD|GV_NOTQUAL), $%);\n} if $%; #PAGE_NUMBER
-    print         qq{    sv_setiv_mg(get_sv("-", GV_ADD|GV_NOTQUAL), $-);\n} unless ($- == 0 or $- == 60); #LINES_LEFT
-    print         qq{    sv_setiv_mg(get_sv("=", GV_ADD|GV_NOTQUAL), $=);\n} if $= != 60; #LINES_PER_PAGE
+EOT
 
-    # deprecated global vars
-    print qq{    {SV* s = get_sv("[",GV_NOTQUAL); sv_setiv(s, $[); mg_set(s);}\n} if $[; #ARRAY_BASE
-    if ($] < 5.010) { # OFMT and multiline matching
-      eval q[
-            print sprintf(qq{    sv_setpv(GvSVn(gv_fetchpv("\$#", GV_ADD|GV_NOTQUAL, SVt_PV)), %s);\n},
-                          cstring($#)) if $#;
-            print sprintf(qq{    sv_setiv(GvSVn(gv_fetchpv("\$*", GV_ADD|GV_NOTQUAL, SVt_IV)), %d);\n}, $*) if $*;
-           ];
     }
 
-    print sprintf(qq{    sv_setpv_mg(get_sv("\030", GV_ADD|GV_NOTQUAL), %s); /* \$^X */\n}, cstring($^X));
+    my $X = $^X =~ /[\s\\]/ ? B::cchar($^X) : $^X;
     print <<"EOT";
+    if ((tmpgv = gv_fetchpv("\030", TRUE, SVt_PV))) {/* $^X */
+        tmpsv = GvSVn(tmpgv);
+        sv_setpv(tmpsv,"$X");
+        SvSETMAGIC(tmpsv);
+    }
+
     TAINT_NOT;
 
     #if PERL_VERSION < 10 || ((PERL_VERSION == 10) && (PERL_SUBVERSION < 1))
@@ -6254,32 +5050,35 @@ _EOT15
       CvUNIQUE_on(PL_compcv);
       CvPADLIST(PL_compcv) = pad_new(0);
     #endif
+    #if PERL_VERSION > 7
+      boot_core_PerlIO();
+    #endif
+    boot_core_UNIVERSAL();
+    #if PERL_VERSION > 9
+      boot_core_mro();
+    #endif
+    #if PERL_VERSION < 11
+      boot_core_xsutils(); /* attributes::bootstrap */
+    #endif
 
     /* our special compiled init */
     exitstatus = perl_init(aTHX);
     if (exitstatus)
 	exit( exitstatus );
     dl_init(aTHX);
-    perl_init2(aTHX);
 EOT
 
     print $B::C::eval_pvs if $B::C::eval_pvs;
     print "    exitstatus = perl_run( my_perl );\n";
-    foreach my $s ( @{ $init->[-1]{pre_destruct} } ) {
-      print "    ".$s."\n";
-    }
 
-    if ( !$B::C::destruct ) {
+    if ( !$B::C::destruct and $^O ne 'MSWin32' ) {
       warn "fast_perl_destruct (-fno-destruct)\n" if $verbose;
       print "    fast_perl_destruct( my_perl );\n";
-    #} elsif ( $PERL510 and (@B::C::static_free or $free->index > -1) ) {
-    #  warn "my_perl_destruct static strings\n" if $verbose;
-    #  print "    my_perl_destruct( my_perl );\n";
-    #} elsif ( $] >= 5.007003 ) {
-    #  print "    perl_destruct( my_perl );\n";
-    }
-    else {
+    } elsif ( $PERL510 and (@static_free or $free->index > -1) ) {
+      warn "my_perl_destruct (-fcog)\n" if $verbose;
       print "    my_perl_destruct( my_perl );\n";
+    } elsif ( $] >= 5.007003 ) {
+      print "    perl_destruct( my_perl );\n";
     }
     # XXX endav is called via call_list and so it is freed right after usage. Setting dirty here is useless
     #print "    PL_dirty = 1;\n" unless $B::C::pv_copy_on_grow; # protect against pad undef in END block
@@ -6300,7 +5099,7 @@ sub dump_symtable {
   my ( $sym, $val );
   warn "----Symbol table:\n";
   #while ( ( $sym, $val ) = each %symtable )
-  for $sym (sort keys %symtable) {
+  for $sym (keys %symtable) {
     $val = $symtable{$sym};
     warn "$sym => $val\n";
   }
@@ -6329,120 +5128,49 @@ sub B::GV::savecv {
   my $hv      = $gv->HV;
 
   my $fullname = $package . "::" . $name;
-  warn sprintf( "Checking GV *%s 0x%x\n", cstring($fullname), $$gv )
-    if $debug{gv} and $verbose;
+  warn sprintf( "Checking GV &%s 0x%x\n", cstring($fullname), $$gv )
+    if $debug{gv};
+
   # We may be looking at this package just because it is a branch in the
   # symbol table which is on the path to a package which we need to save
   # e.g. this is 'Getopt' and we need to save 'Getopt::Long'
   #
   return if ( $package ne 'main' and !$include_package{$package} );
   return if ( $package eq 'main' and
-	      $name =~ /^([^_A-Za-z0-9].*|_\<.*|INC|ARGV|SIG|ENV|BEGIN|main::|!)$/ );
+  	      $name =~ /^([^_A-Za-z0-9].*|_\<.*|INC|STDIN|STDOUT|STDERR|ARGV|SIG|ENV|BEGIN|main::|!)$/ );
 
-  warn sprintf( "Used GV \*$fullname 0x%x\n", $$gv ) if $debug{gv};
-  return unless ( $$cv || $$av || $$sv || $$hv || $gv->IO || $gv->FORM );
+  warn sprintf( "Used GV \&$fullname 0x%x\n", $$gv ) if $debug{gv};
+  return unless ( $$cv || $$av || $$sv || $$hv );
   if ($$cv and $name eq 'bootstrap' and $cv->XSUB) {
     #return $cv->save($fullname);
     warn sprintf( "Skip XS \&$fullname 0x%x\n", $$cv ) if $debug{gv};
-    return;
-  }
-  if ( $$cv and in_static_core($package, $name) and ref($cv) eq 'B::CV' # 5.8,4 issue32
-       and $cv->XSUB ) {
-    warn("Skip internal XS $fullname\n") if $debug{gv};
-    # but prevent it from being deleted
-    unless ($dumped_package{$package}) {
-      $dumped_package{$package} = 1;
-      mark_package($package, 1);
-    }
     return;
   }
   if ($package eq 'B::C') {
     warn sprintf( "Skip XS \&$fullname 0x%x\n", $$cv ) if $debug{gv};
     return;
   }
-  if ($fullname =~ /^(bytes|utf8)::AUTOLOAD$/) {
-    $gv = force_heavy($package);
-  }
-  # XXX fails and should not be needed. The B::C part should be skipped 9 lines above, but be defensive
-  return if $fullname eq 'B::walksymtable' or $fullname eq 'B::C::walksymtable';
+  # we should not delete already saved packages
+  $saved{$package}++;
+  return if $fullname eq 'B::walksymtable'; # XXX fails and should not be needed
   # Config is marked on any Config symbol. TIE and DESTROY are exceptions,
-  # used by the compiler itself. TODO: -fno-config to compile Config values in directly
-  # This will only work on the same machine with the very same Config.
-  if ($fullname eq 'Config::Config') {
+  # used by the compiler itself
+  if ($name eq 'Config') {
     mark_package('Config', 1) if !$include_package{'Config'};
   }
-  $dumped_package{$package} = 1 if !exists $dumped_package{$package} and $package !~ /::$/;
-  warn sprintf( "Saving GV \*$fullname 0x%x\n", $$gv ) if $debug{gv};
+  warn sprintf( "Saving GV &$fullname 0x%x\n", $$gv ) if $debug{gv};
   $gv->save($fullname);
-}
-
-# Fixes bug #307: use foreach, not each
-# each is not safe to use (at all). walksymtable is called recursively which might add
-# symbols to the stash, which might cause re-ordered rehashes, which will fool the hash
-# iterator, leading to missing symbols in the binary.
-# Old perl5 bug: The iterator should really be stored in the op, not the hash.
-sub walksymtable {
-  my ($symref, $method, $recurse, $prefix) = @_;
-  my ($sym, $ref, $fullname);
-  $prefix = '' unless defined $prefix;
-  foreach my $sym ( sort keys %$symref ) {
-    no strict 'refs';
-    $ref = $symref->{$sym};
-    $fullname = "*main::".$prefix.$sym;
-    if ($sym =~ /::$/) {
-      $sym = $prefix . $sym;
-      if (svref_2object(\*$sym)->NAME ne "main::" && $sym ne "<none>::" && &$recurse($sym)) {
-        walksymtable(\%$fullname, $method, $recurse, $sym);
-      }
-    } else {
-      svref_2object(\*$fullname)->$method();
-    }
-  }
-}
-
-sub walk_syms {
-  my $package = shift;
-  no strict 'refs';
-  return if $dumped_package{$package};
-  warn "walk_syms $package\n" if $debug{pkg} and $verbose;
-  $dumped_package{$package} = 1;
-  walksymtable( \%{$package.'::'}, "savecv", sub { 1 }, $package.'::' );
-}
-
-# simplified walk_syms
-# needed to populate @B::C::Flags::deps from Makefile.PL from within this %INC context
-sub walk_stashes {
-  my ($symref, $prefix) = @_;
-  no strict 'refs';
-  $prefix = '' unless defined $prefix;
-  foreach my $sym ( sort keys %$symref ) {
-    if ($sym =~ /::$/) {
-      $sym = $prefix . $sym;
-      $B::C::deps{ substr($sym,0,-2) }++;
-      if ($sym ne "main::" && $sym ne "<none>::") {
-        walk_stashes(\%$sym, $sym);
-      }
-    }
-  }
-}
-
-sub collect_deps {
-  %B::C::deps = ();
-  walk_stashes(\%main::);
-  print join " ",(sort keys %B::C::deps);
 }
 
 sub mark_package {
   my $package = shift;
   my $force = shift;
   $force = 0 if $] < 5.010;
-  return if skip_pkg($package); # or $package =~ /^B::C(C?)::/;
+  return if $skip_package{$package} or $package =~ /^B::C(C?)::/;
   if ( !$include_package{$package} or $force ) {
     no strict 'refs';
-    warn "mark_package($package, $force)\n" if $verbose and $debug{pkg};
     my @IO = qw(IO::File IO::Handle IO::Socket IO::Seekable IO::Poll);
     mark_package('IO') if grep { $package eq $_ } @IO;
-    mark_package("DynaLoader") if $package eq 'XSLoader';
     $use_xsloader = 1 if $package =~ /^B|Carp$/; # to help CC a bit (49)
     # i.e. if force
     if (exists $include_package{$package}
@@ -6453,15 +5181,16 @@ sub mark_package {
 		   $force?" (forced)":"") if $verbose;
       # $include_package{$package} = 1;
       add_hashINC( $package );
-      walk_syms( $package );
+      walksymtable( \%{$package.'::'}, "savecv",
+		    sub { should_save( $_[0] ); return 1 },
+		    $package.'::' );
     } else {
       warn sprintf("mark $package%s\n", $force?" (forced)":"")
 	if !$include_package{$package} and $verbose and $debug{pkg};
       $include_package{$package} = 1;
       push_package($package) if $] < 5.010;
-      walk_syms( $package ) if !$B::C::walkall; # fixes i27-1
     }
-    my @isa = get_isa($package);
+    my @isa = $PERL510 ? @{mro::get_linear_isa($package)} : @{ $package . '::ISA' };
     if ( @isa ) {
       # XXX walking the ISA is often not enough.
       # we should really check all new packages since the last full scan.
@@ -6474,13 +5203,11 @@ sub mark_package {
           }
         }
 	if ( !$include_package{$isa} and !$skip_package{$isa} ) {
-          no strict 'refs';
 	  warn "$isa saved (it is in $package\'s \@ISA)\n" if $verbose;
-          B::svref_2object( \@{$isa."::ISA"} ) ->save; #308
 	  if (exists $include_package{$isa} ) {
 	    warn "$isa previously deleted, save now\n" if $verbose; # e.g. Sub::Name
 	    mark_package($isa);
-            walk_syms($isa); # avoid deep recursion
+	    walksymtable( \%{$isa.'::'}, "savecv", \&should_save, $isa.'::' );
           } else {
 	    #warn "isa $isa save\n" if $verbose;
             mark_package($isa);
@@ -6506,7 +5233,7 @@ sub in_static_core {
     return $cvname eq 'method_changed_in';
   }
   if ($stashname eq 're') {
-    return $cvname =~ /^(is_regexp|regname|regnames|regnames_count|regexp_pattern)$/;;
+    return $cvname =~ /^(is_regexp|regname|regnames_count|regexp_pattern)$/;;
   }
   if ($stashname eq 'PerlIO') {
     return $cvname eq 'get_layers';
@@ -6525,50 +5252,41 @@ sub static_core_packages {
   push @pkg, 'attributes'             if $] <  5.011; # partially static and dynamic
   push @pkg, 'version'                if $] >= 5.010; # partially static and dynamic
   push @pkg, 'Tie::Hash::NamedCapture' if $] < 5.014; # dynamic since 5.14
-  #push @pkg, 'DynaLoader'	      if $Config{usedl};
+  push @pkg, 'DynaLoader'		if $Config{usedl};
   # Win32CORE only in official cygwin pkg. And it needs to be bootstrapped,
   # handled by static_ext.
-  push @pkg, 'Cygwin'		if $^O eq 'cygwin';
+  push @pkg, 'Cygwin'			if $^O eq 'cygwin';
   push @pkg, 'NetWare'		if $^O eq 'NetWare';
-  push @pkg, 'OS2'		if $^O eq 'os2';
+  push @pkg, 'OS2'			if $^O eq 'os2';
   push @pkg, qw(VMS VMS::Filespec vmsish) if $^O eq 'VMS';
   #push @pkg, 'PerlIO' if $] >= 5.008006; # get_layers only
-  push @pkg, split(/ /,$Config{static_ext});
   return @pkg;
 }
 
 sub skip_pkg {
   my $package = shift;
-  if ( $package =~ /^(main::)?(Internals|O)::/
-       #or $package =~ /::::/ #  CORE/base/lex.t 54
-       or $package =~ /^B::C::/
-       or $package eq '__ANON__'
+  if ( $package =~ /^(mro)$/
+       or $package =~ /^(main::)?(B|Internals|O)::/
+       or $package =~ /::::/
        or index($package, " ") != -1 # XXX skip invalid package names
        or index($package, "(") != -1 # XXX this causes the compiler to abort
        or index($package, ")") != -1 # XXX this causes the compiler to abort
-       or exists $skip_package{$package}
        or ($DB::deep and $package =~ /^(DB|Term::ReadLine)/)) {
     return 1;
   }
   return 0;
 }
 
-# Do not delete/ignore packages which were brought in from the script,
-# i.e. not defined in B::C or O. Just to be on the safe side.
+# with -O0 or -O1 do not delete packages which were brought in from
+# the script, i.e. not defined in B::C or O. Just to be on the safe side.
 sub can_delete {
-  my $pkg = shift;
-  if (exists $all_bc_deps{$pkg} and $B::C::can_delete_pkg) { return 1 };
-  return undef;
+  return $B::C::can_delete_pkg or $all_bc_pkg{$_{0}};
 }
 
 sub should_save {
   no strict qw(vars refs);
   my $package = shift;
   $package =~ s/::$//;
-  if ( skip_pkg($package) ) {
-    delete_unsaved_hashINC($package) if can_delete($package);
-    return 0;
-  }
   return $include_package{$package} = 0
     if ( $package =~ /::::/ );    # skip ::::ISA::CACHE etc.
   warn "Considering $package\n" if $debug{pkg}; #$include_package{$package}
@@ -6582,111 +5300,84 @@ sub should_save {
       return;
     } else {
       warn "ext/mro already loaded\n" if $debug{pkg};
-      # $include_package{mro} = 1 if grep { $_ eq 'mro' } @DynaLoader::dl_modules;
-      return $include_package{mro};
     }
   }
-  if ($package eq 'attributes' and $] > 5.011
-      and grep { $_ eq 'attributes' } @DynaLoader::dl_modules)
+  foreach my $u ( grep( $include_package{$_}, keys %include_package ) )
   {
-    mark_package($package, 1);
-    return 1;
-  }
-  if (exists $all_bc_deps{$package}) {
-    foreach my $u ( grep( $include_package{$_}, sort keys %include_package ) ) {
-      # If this package is a prefix to something we are saving, traverse it
-      # but do not mark it for saving if it is not already
-      # e.g. to get to B::OP we need to traverse B:: but need not save B
-      my $p = $package;
-      $p =~ s/(\W)/\\$1/g;
-      return 1 if ( $u =~ /^$p\:\:/ ) && $include_package{$package};
-    }
+    # If this package is a prefix to something we are saving, traverse it
+    # but do not mark it for saving if it is not already
+    # e.g. to get to Getopt::Long we need to traverse Getopt but need
+    # not save Getopt
+    my $p = $package;
+    $p =~ s/(\W)/\\$1/g;
+    return 1 if ( $u =~ /^$p\:\:/ );
   }
   # Needed since 5.12.2: Check already if deleted
-  my $incpack = inc_packname($package);
-  if ( $] > 5.015001 and exists $all_bc_deps{$package}
-       and !exists $curINC{$incpack} and $savINC{$incpack} ) {
+  if ( $] > 5.015001 and
+       !exists $INC{inc_packname($package)} and $savINC{inc_packname($package)} ) {
     $include_package{$package} = 0;
     warn "Cached $package not in \%INC, already deleted (early)\n" if $debug{pkg};
     return 0;
   }
-  # issue348: only drop B::C packages, not any from user code.
-  if (($package =~ /^DynaLoader|XSLoader$/ and $use_xsloader)
-      or (!exists $all_bc_deps{$package})) {
-    $include_package{$package} = 1;
-  }
+  return 1 if $package =~ /^DynaLoader|XSLoader$/ and $use_xsloader;
   # If this package is in the same file as main:: or our source, save it. (72, 73)
   if ($mainfile) {
     # Find the first cv in this package for CV->FILE
     no strict 'refs';
-    for my $sym (sort keys %{$package.'::'}) {
+    for my $sym (keys %{$package.'::'}) {
       if (defined &{$package.'::'.$sym}) {
 	# compare cv->FILE to $mainfile
 	my $cv = svref_2object(\&{$package.'::'.$sym});
-	if ($cv and $cv->can('FILE') and $cv->FILE) {
+	if ($cv and $cv->FILE) {
 	  $include_package{$package} = 1 if $mainfile eq $cv->FILE;
 	  last;
 	}
       }
     }
   }
-  # add overloaded but otherwise empty packages (#172)
-  if ($savINC{'overload.pm'} and exists ${$package.'::'}{OVERLOAD} and exists ${$package.'::'}{'()'}) {
-    mark_package($package, 1);
-    mark_package('overload', 1);
-    return 1;
-  }
+
   # Omit the packages which we use (and which cause grief
   # because of fancy "goto &$AUTOLOAD" stuff).
   # XXX Surely there must be a nicer way to do this.
+  if (skip_pkg($package) and can_delete($package) ) {
+    delete_unsaved_hashINC($package);
+    return; # $include_package{$package} = 0;
+  }
+
   if ( exists $include_package{$package} ) {
-    if (! exists $all_bc_deps{$package}) {
-      $include_package{$package} = 1;
-      $curINC{$incpack} = $savINC{$incpack};
-      warn "Cached new $package is kept\n" if $debug{pkg};
+    if ($debug{pkg}) {
+      if (exists $include_package{$package} and $include_package{$package}) {
+        warn "$package is cached\n";
+      } else {
+        warn "Cached $package is already deleted\n";
+      }
     }
-    elsif (!$include_package{$package}) {
-      delete_unsaved_hashINC($package) if can_delete($package);
-      warn "Cached $package is already deleted\n" if $debug{pkg};
-    } else {
-      warn "Cached $package is cached\n" if $debug{pkg};
+    if (!$include_package{$package} and can_delete($package)) {
+      delete_unsaved_hashINC($package);
     }
     return $include_package{$package};
   }
 
   # Now see if current package looks like an OO class. This is probably too strong.
-  if (!$all_bc_deps{$package}) {
-    foreach my $m (qw(new DESTROY TIESCALAR TIEARRAY TIEHASH TIEHANDLE)) {
-      # 5.10 introduced version and Regexp::DESTROY, which we dont want automatically.
-      # XXX TODO This logic here is wrong and unstable. Fixes lead to more failures.
-      # The walker deserves a rewrite.
-      if ( UNIVERSAL::can( $package, $m ) and $package !~ /^(B::C|version|Regexp|utf8|SelectSaver)$/ ) {
-        next if $package eq 'utf8' and $m eq 'DESTROY'; # utf8::DESTROY is empty
-        # we load Errno by ourself to avoid double Config warnings [perl #]
-        # and we have special logic to detect and include it
-        next if $package =~ /^(Errno|Tie::Hash::NamedCapture)$/ and $m eq 'TIEHASH';
-        # XXX Config and FileHandle should not just return. If unneeded skip em.
-        return 0 if $package eq 'Config' and $m =~ /DESTROY|TIEHASH/; # Config detected in GV
-        # IO::File|IO::Handle added for B::CC only
-        return 0 if $package =~ /^(FileHandle|IO::File|IO::Handle)/ and $m eq 'new';
-        warn "$package has method $m: saving package\n" if $debug{pkg};
-        return mark_package($package);
-      }
+  foreach my $m (qw(new DESTROY TIESCALAR TIEARRAY TIEHASH TIEHANDLE)) {
+    # 5.10 introduced version and Regexp::DESTROY, which we dont want automatically.
+    # XXX TODO This logic here is wrong and unstable. Fixes lead to more failures.
+    # The walker deserves a rewrite.
+    if ( UNIVERSAL::can( $package, $m ) and $package !~ /^(B::C|version|Regexp|utf8|SelectSaver)$/ ) {
+      next if $package eq 'utf8' and $m eq 'DESTROY'; # utf8::DESTROY is empty
+      # we load Errno by ourself to avoid double Config warnings [perl #]
+      next if $package eq 'Errno' and $m eq 'TIEHASH';
+      # XXX Config and FileHandle should not just return. If unneeded skip em.
+      return 0 if $package eq 'Config' and $m =~ /DESTROY|TIEHASH/; # Config detected in GV
+      return 0 if $package eq 'FileHandle' and $m eq 'new';
+      warn "$package has method $m: saving package\n" if $debug{pkg};
+      return mark_package($package);
     }
   }
   if ($package !~ /^PerlIO/ and can_delete($package)) {
     delete_unsaved_hashINC($package);
   }
-  if (can_delete($package)) {
-    warn "Delete $package\n" if $debug{pkg};
-    return $include_package{$package} = 0;
-  } elsif (! exists $all_bc_deps{$package}) { # and not in @deps
-    warn "Keep $package\n" if $debug{pkg};
-    return $include_package{$package} = 1;
-  } else { # in @deps
-    # warn "Ignore $package\n" if $debug{pkg};
-    return;
-  }
+  return $include_package{$package} = 0;
 }
 
 sub inc_packname {
@@ -6714,18 +5405,17 @@ sub delete_unsaved_hashINC {
   my $package = shift;
   my $incpack = inc_packname($package);
   # Not already saved package, so it is not loaded again at run-time.
-  return if $dumped_package{$package};
-  # Never delete external packages, but this check is done before
+  return if $saved{$package};
   return if $package =~ /^DynaLoader|XSLoader$/
     and defined $use_xsloader
     and $use_xsloader == 0;
   return if $^O eq 'MSWin32' and $package =~ /^Carp|File::Basename$/;
   $include_package{$package} = 0;
-  if ($curINC{$incpack}) {
-    #warn "Deleting $package from \%INC\n" if $debug{pkg};
-    $savINC{$incpack} = $curINC{$incpack} if !$savINC{$incpack};
-    $curINC{$incpack} = undef;
-    delete $curINC{$incpack};
+  if ($INC{$incpack}) {
+    warn "Deleting $package from \%INC\n" if $debug{pkg};
+    $savINC{$incpack} = $INC{$incpack} if !$savINC{$incpack};
+    $INC{$incpack} = undef;
+    delete $INC{$incpack};
   }
 }
 
@@ -6733,19 +5423,19 @@ sub add_hashINC {
   my $package = shift;
   my $incpack = inc_packname($package);
   $include_package{$package} = 1;
-  unless ($curINC{$incpack}) {
+  unless ($INC{$incpack}) {
     if ($savINC{$incpack}) {
       warn "Adding $package to \%INC (again)\n" if $debug{pkg};
-      $curINC{$incpack} = $savINC{$incpack};
+      $INC{$incpack} = $savINC{$incpack};
       # need to check xsub
       $use_xsloader = 1 if $package =~ /^DynaLoader|XSLoader$/;
     } else {
       warn "Adding $package to \%INC\n" if $debug{pkg};
       for (@INC) {
         my $p = $_.'/'.$incpack;
-        if (-e $p) { $curINC{$incpack} = $p; last; }
+        if (-e $p) { $INC{$incpack} = $p; last; }
       }
-      $curINC{$incpack} = $incpack unless $curINC{$incpack};
+      $INC{$incpack} = $incpack unless $INC{$incpack};
     }
   }
 }
@@ -6753,10 +5443,12 @@ sub add_hashINC {
 sub walkpackages {
   my ( $symref, $recurse, $prefix ) = @_;
   no strict 'vars';
+  my $sym;
   $prefix = '' unless defined $prefix;
   # check if already deleted - failed since 5.15.2
   return if $savINC{inc_packname(substr($prefix,0,-2))};
-  for my $sym (sort keys %$symref) {
+  #while ( ( $sym, $ref ) = each %$symref )
+  for $sym (keys %$symref) {
     my $ref = $symref->{$sym};
     next unless $ref;
     local (*glob);
@@ -6781,40 +5473,20 @@ sub save_unused_subs {
     %debug = ();
   }
   my $main = $module ? $module."::" : "main::";
-
-  # -fwalkall: better strategy for compile-time added and required packages:
-  # loop savecv and check pkg cache for new pkgs.
-  # if so loop again with those new pkgs only, until the list of new pkgs is empty
-  my ($walkall_cnt, @init_unused, @unused, @dumped) = (0);
-  #do
-  @init_unused = grep { $include_package{$_} } keys %include_package;
   if ($verbose) {
-    warn "Prescan for unused subs in $main " . ($sav_debug{unused} ? " (silent)\n" : "\n");
+    warn "Prescan for unused subs in $main" . ($sav_debug{unused} ? " (silent)\n" : "\n");
   }
   # XXX TODO better strategy for compile-time added and required packages:
   # loop savecv and check pkg cache for new pkgs.
   # if so loop again with those new pkgs only, until the list of new pkgs is empty
   descend_marked_unused();
-  walkpackages( \%{$main}, \&should_save, $main eq 'main::' ? undef : $main );
-  warn "Saving unused subs in $main" . ($sav_debug{unused} ? " (silent)\n" : "\n")
-    if $verbose;
-  walksymtable( \%{$main}, "savecv", \&should_save );
-  @unused = grep { $include_package{$_} } keys %include_package;
-  @dumped = grep { $dumped_package{$_} and $_ ne 'main' } keys %dumped_package;
-  warn sprintf("old unused: %d, new: %d, dumped: %d\n", scalar @init_unused, scalar @unused, scalar @dumped)
-    if $verbose;
-  if (!$B::C::walkall) {
-    @unused = @init_unused = ();
-  } else {
-    my $done;
-    do {
-      $done = dump_rest();
-      @unused = grep { $include_package{$_} } keys %include_package;
-      @dumped = grep { $dumped_package{$_} and $_ ne 'main' } keys %dumped_package;
-    } while @unused > @dumped and $done;
-    last if $walkall_cnt++ > 3;
+  walkpackages( \%{$main},
+                sub { should_save( $_[0] ); return 1 },
+                $main eq 'main::' ? undef : $main );
+  if ($verbose) {
+    warn "Saving unused subs in $main" . ($sav_debug{unused} ? " (silent)\n" : "\n");
   }
-  #} while @unused > @init_unused;
+  walksymtable( \%{$main}, "savecv", \&should_save );
 
   if ( $sav_debug{unused} ) {
     %debug = %sav_debug;
@@ -6823,14 +5495,7 @@ sub save_unused_subs {
   # If any m//i is run-time loaded we'll get a "Undefined subroutine utf8::SWASHNEW"
   # With -fno-fold we don't insist on loading utf8_heavy and Carp.
   # Until it is compile-time required.
-  if (exists($INC{'unicore/To/Title.pl'})
-      or exists($INC{'unicore/To/Tc.pl'}) #242
-      or exists($INC{'unicore/Heavy.pl'}) #242
-      or ($savINC{'utf8_heavy.pl'} and ($B::C::fold or exists($savINC{'utf8.pm'})))) {
-    require "utf8.pm" unless $savINC{"utf8.pm"};
-    mark_package('utf8');
-    require "utf8_heavy.pl" unless $savINC{"utf8_heavy.pl"}; # bypass AUTOLOAD
-    mark_package('utf8_heavy.pl');
+  if ($] >= 5.013009 and $INC{'utf8_heavy.pl'} and ($B::C::fold or exists($INC{'utf8.pm'}))) {
     # In CORE utf8::SWASHNEW is demand-loaded from utf8 with Perl_load_module()
     # It adds about 1.6MB exe size 32-bit.
     svref_2object( \&{"utf8\::SWASHNEW"} )->save;
@@ -6840,96 +5505,36 @@ sub save_unused_subs {
   # With -fno-warnings we don't insist on initializing warnings::register_categories and Carp.
   # Until it is compile-time required.
   # 68KB exe size 32-bit
-  if ($] >= 5.013005 and ($B::C::warnings and exists $dumped_package{Carp})) {
+  if ($] >= 5.013005 and ($B::C::warnings or exists($INC{'Carp.pm'}))) {
     svref_2object( \&{"warnings\::register_categories"} )->save; # 68Kb 32bit
     add_hashINC("warnings");
     add_hashINC("warnings::register");
   }
   if ($use_xsloader) {
     force_saving_xsloader();
-    unless ($ENV{CPANEL_PERL}) { # patched DynaLoader to exclude Config
-      mark_package('Config', 1); # required by Dynaloader and special cased previously
-    }
+    mark_package('Config', 1); # required by Dynaloader and special cased previously
   }
 }
 
 sub inc_cleanup {
-  my $rec_cnt = shift;
   # %INC sanity check issue 89:
   # omit unused, unsaved packages, so that at least run-time require will pull them in.
-  my @deleted_inc;
-  for my $package (sort keys %INC) {
+  for my $package (keys %INC) {
     my $pkg = packname_inc($package);
-    if ($package =~ /^(Config_git\.pl|Config_heavy.pl)$/ and !$dumped_package{'Config'}) {
-      delete $curINC{$package};
+    if ($package =~ /^(Config_git\.pl|Config_heavy.pl)$/ and !$include_package{'Config'}) {
+      delete $INC{$package};
     } elsif ($package eq 'utf8_heavy.pl' and !$include_package{'utf8'}) {
-      delete $curINC{$package};
+      delete $INC{$package};
       delete_unsaved_hashINC('utf8');
-    } elsif (!$B::C::walkall and !exists $dumped_package{$pkg}) {
-      delete_unsaved_hashINC($pkg);
-      push @deleted_inc, $pkg;
-    }
-  }
-  # sync %curINC deletions back to %INC
-  for my $p (sort keys %INC) {
-    if (!exists $curINC{$p}) {
-      delete $INC{$p};
-      push @deleted_inc, $p;
+    } else {
+      delete_unsaved_hashINC($pkg) unless $include_package{$pkg};
     }
   }
   if ($debug{pkg} and $verbose) {
     warn "\%include_package: ".join(" ",grep{$include_package{$_}} sort keys %include_package)."\n";
-    warn "\%dumped_package:  ".join(" ",grep{$dumped_package{$_}} sort keys %dumped_package)."\n";
-  }
-  # issue 340,350: do only on -fwalkall? do it in the main walker step
-  # as in branch walkall-early?
-  if ($B::C::walkall) {
-    my $again = dump_rest();
-    inc_cleanup($rec_cnt++) if $again and $rec_cnt < 2; # maximal 3 times
-  }
-  # final cleanup
-  for my $p (sort keys %INC) {
-    my $pkg = packname_inc($p);
-    delete_unsaved_hashINC($pkg) unless exists $dumped_package{$pkg};
-    # sync %curINC deletions back to %INC
-    if (!exists $curINC{$p} and exists $INC{$p}) {
-      delete $INC{$p};
-      push @deleted_inc, $p;
-    }
-  }
-  if ($debug{pkg} and $verbose) {
-    warn "Deleted from \%INC: ".join(" ",@deleted_inc)."\n" if @deleted_inc;
     my @inc = grep !/auto\/.+\.(al|ix)$/, sort keys %INC;
     warn "\%INC: ".join(" ",@inc)."\n";
   }
-}
-
-sub dump_rest {
-  my $again;
-  warn "dump_rest:\n" if $verbose or $debug{pkg};
-  #for my $p (sort keys %INC) {
-  #}
-  for my $p (sort keys %include_package) {
-    $p =~ s/^main:://;
-    if ($include_package{$p} and !exists $dumped_package{$p}
-        and !$static_core_pkg{$p}
-        and $p !~ /^(threads|main|__ANON__|PerlIO)$/
-       )
-    {
-      if ($p eq 'warnings::register' and !$B::C::warnings) {
-        delete_unsaved_hashINC('warnings::register');
-        next;
-      }
-      $again++;
-      warn "$p marked but not saved, save now\n" if $verbose or $debug{pkg};
-      # mark_package( $p, 1);
-      #eval {
-      #  require(inc_packname($p)) && add_hashINC( $p );
-      #} unless $savINC{inc_packname($p)};
-      walk_syms( $p );
-    }
-  }
-  $again;
 }
 
 sub save_context {
@@ -6937,40 +5542,25 @@ sub save_context {
   warn "save context:\n" if $verbose;
 
   if ($PERL510) {
-    # need to mark assign c3 to %main::. no need to assign the default dfs
-    if (mro::get_mro("main") eq 'c3') {
-      mark_package('mro', 1);
-      warn "set c3 for main\n" if $debug{pkg};
-      $init->add_eval( 'mro::set_mro("main", "c3");' );
+    # Tie::Hash::NamedCapture is added for *main::+ or *main::-
+    # Errno is added for *main::!
+    no strict 'refs';
+    if ( defined(objsym(svref_2object(\*{'main::+'}))) or defined(objsym(svref_2object(\*{'main::-'}))) ) {
+      use strict 'refs';
+      if (!$include_package{'Tie::Hash::NamedCapture'}) {
+	$init->add("/* force saving of Tie::Hash::NamedCapture */");
+	mark_package('Tie::Hash::NamedCapture', 1);
+      } # else already included
+    } else {
+      use strict 'refs';
+      delete_unsaved_hashINC('Tie::Hash::NamedCapture');
     }
-    # Tie::Hash::NamedCapture is added for *+ *-, Errno for *!
-    #no strict 'refs';
-    #if ( defined(objsym(svref_2object(\*{'main::+'}))) or defined(objsym(svref_2object(\*{'main::-'}))) ) {
-    #  use strict 'refs';
-    #  if (!$include_package{'Tie::Hash::NamedCapture'}) {
-    #	$init->add("/* force saving of Tie::Hash::NamedCapture */");
-    #    if ($] >= 5.014) {
-    #      mark_package('Config', 1);  # DynaLoader needs Config to set the EGV
-    #      walk_syms('Config');
-    #      svref_2object(\&{'Tie::Hash::NamedCapture::bootstrap'})->save;
-    #    }
-    #	mark_package('Tie::Hash::NamedCapture', 1);
-    #  } # else already included
-    #} else {
-    #  use strict 'refs';
-    #  delete_unsaved_hashINC('Tie::Hash::NamedCapture');
-    #}
     no strict 'refs';
     if ( defined(objsym(svref_2object(\*{'main::!'}))) ) {
       use strict 'refs';
       if (!$include_package{'Errno'}) {
 	$init->add("/* force saving of Errno */");
-        unless ($ENV{CPANEL_PERL}) { # patched Errno to exclude Config check
-          mark_package('Config', 1);
-          walk_syms('Config');
-        }
 	mark_package('Errno', 1);
-        svref_2object(\&{'Errno::bootstrap'})->save;
       } # else already included
     } else {
       use strict 'refs';
@@ -6978,62 +5568,44 @@ sub save_context {
     }
   }
 
-  my ($curpad_nam, $curpad_sym);
-  {
-    # Record comppad sv's names, may not be static
-    local $B::C::const_strings = 0;
-    $init->add("/* curpad names */");
-    warn "curpad names:\n" if $verbose;
-    $curpad_nam      = ( comppadlist->ARRAY )[0]->save('curpad_name');
-    warn "curpad syms:\n" if $verbose;
-    $init->add("/* curpad syms */");
-    $curpad_sym      = ( comppadlist->ARRAY )[1]->save('curpad_syms');
-  }
+  $init->add("/* curpad names */");
+  warn "curpad names:\n" if $verbose;
+  # Record comppad sv's names, may not be static
+  local $B::C::pv_copy_on_grow;
+  #my $svi = $svsect->index;
+  my $curpad_nam      = ( comppadlist->ARRAY )[0]->save('curpad_name');
+  # XXX from $svi to $svsect->index we have new sv's
+  warn "curpad syms:\n" if $verbose;
+  $init->add("/* curpad syms */");
+  my $curpad_sym      = ( comppadlist->ARRAY )[1]->save('curpad_syms');
   my ($inc_hv, $inc_av);
   {
-    local $B::C::const_strings = 1 if $B::C::ro_inc;
+    local $B::C::pv_copy_on_grow;
+    $B::C::pv_copy_on_grow = 1 if $B::C::ro_inc;
+    $B::C::const_strings = 1 if $B::C::ro_inc;
     warn "\%INC and \@INC:\n" if $verbose;
     $init->add('/* %INC */');
-    inc_cleanup(0);
+    inc_cleanup();
     my $inc_gv = svref_2object( \*main::INC );
     $inc_hv    = $inc_gv->HV->save('main::INC');
-    $init->add('/* @INC */');
+    $init->add( sprintf( "GvHV(%s) = s\\_%x;",
+			 $inc_gv->save('main::INC'), $inc_gv->HV ) );
+    # $init->add('/* @INC */');
     $inc_av    = $inc_gv->AV->save('main::INC');
   }
-  # ensure all included @ISA's are stored (#308), and also assign c3 (#325)
-  my @saved_isa;
-  for my $p (sort keys %include_package) {
-    no strict 'refs';
-    if ($include_package{$p} and exists(${$p.'::'}{ISA}) and ${$p.'::'}{ISA}) {
-      push @saved_isa, $p;
-      svref_2object( \@{$p.'::ISA'} )->save($p.'::ISA');
-      if ($PERL510 and mro::get_mro($p) eq 'c3') {
-        # for mro c3 set the algo. there's no C api, only XS
-        warn "set c3 for $p\n" if $debug{pkg};
-        $init->add_eval( sprintf('mro::set_mro(%s, "c3");', cstring($p)) );
-      }
-    }
-  }
-  warn "Saved \@ISA for: ".join(" ",@saved_isa)."\n" if @saved_isa and ($verbose or $debug{pkg});
   $init->add(
     "GvHV(PL_incgv) = $inc_hv;",
     "GvAV(PL_incgv) = $inc_av;",
     "PL_curpad = AvARRAY($curpad_sym);",
     "PL_comppad = $curpad_sym;",    # fixed "panic: illegal pad"
-    "PL_stack_sp = PL_stack_base;"  # reset stack (was 1++)
   );
   if ($] < 5.017005) {
     $init->add(
       "av_store((AV*)CvPADLIST(PL_main_cv), 0, SvREFCNT_inc($curpad_nam)); /* namepad */",
       "av_store((AV*)CvPADLIST(PL_main_cv), 1, SvREFCNT_inc($curpad_sym)); /* curpad */");
-  } elsif ($] < 5.019003) {
-    $init->add(
-      "PadlistARRAY(CvPADLIST(PL_main_cv))[0] = PL_comppad_name = (PAD*)SvREFCNT_inc($curpad_nam); /* namepad */",
-      "PadlistARRAY(CvPADLIST(PL_main_cv))[1] = (PAD*)SvREFCNT_inc($curpad_sym); /* curpad */");
   } else {
     $init->add(
-      "PadlistARRAY(CvPADLIST(PL_main_cv))[0] = PL_comppad_name = (PAD*)SvREFCNT_inc($curpad_nam); /* namepad */",
-      "PadnamelistMAXNAMED(PL_comppad_name) = AvFILL($curpad_nam);",
+      "PadlistARRAY(CvPADLIST(PL_main_cv))[0] = (PAD*)SvREFCNT_inc($curpad_nam); /* namepad */",
       "PadlistARRAY(CvPADLIST(PL_main_cv))[1] = (PAD*)SvREFCNT_inc($curpad_sym); /* curpad */");
   }
   if ($] < 5.017) {
@@ -7044,30 +5616,17 @@ sub save_context {
 }
 
 sub descend_marked_unused {
-  #if ($B::C::walkall) {
-  #  for my $pack (keys %all_bc_deps) {
-  #    mark_unused($pack, 0) if !exists $include_package{$pack} and !skip_pkg($pack);
-  #  }
-  #}
-  foreach my $pack ( sort keys %INC ) {
-    my $p = packname_inc($pack);
-    mark_package($p) if !skip_pkg($p) and !$all_bc_deps{$p} and $pack !~ /(autosplit\.ix|\.al)$/;
-  }
-  if ($debug{pkg} and $verbose) {
-    warn "\%include_package: ".join(" ",grep{$include_package{$_}} sort keys %include_package)."\n";
-    warn "\%skip_package: ".join(" ",sort keys %skip_package)."\n";
-  }
-  foreach my $pack ( sort keys %include_package ) {
-    mark_package($pack) unless skip_pkg($pack);
-  }
+  warn "\%skip_package: ".join(" ",keys %skip_package)."\n" if $debug{pkg};
   warn "descend_marked_unused: "
-    .join(" ",sort keys %include_package)."\n" if $debug{pkg};
+    .join(" ",grep{!$skip_package{$_}} keys %include_package)."\n" if $debug{pkg};
+  foreach my $pack ( keys %include_package ) {
+    mark_package($pack) unless $skip_package{$pack};
+  }
 }
 
 sub save_main {
   warn "Starting compile\n" if $verbose;
   warn "Walking tree\n"     if $verbose;
-  $B::C::curcv = B::main_cv;
   seek( STDOUT, 0, 0 );    #exclude print statements in BEGIN{} into output
   $verbose
     ? walkoptree_slow( main_root, "save" )
@@ -7078,7 +5637,6 @@ sub save_main {
 sub fixup_ppaddr {
   # init op addrs must be the last action, otherwise
   # some ops might not be initialized
-  # but it needs to happen before CALLREGCOMP, as a /i calls a compiled utf8::SWASHNEW
   if ($B::C::optimize_ppaddr) {
     foreach my $i (@op_sections) {
       my $section = $$i;
@@ -7086,6 +5644,9 @@ sub fixup_ppaddr {
       init_op_addr( $section->name, $section->index + 1 );
     }
   }
+
+  init_op_warn( $copsect->name, $copsect->index + 1 )
+    if $B::C::optimize_warn_sv && $copsect->index >= 0;
 }
 
 # save %SIG ( in case it was set in a BEGIN block )
@@ -7093,7 +5654,7 @@ sub save_sig {
   # local $SIG{__WARN__} = shift;
   $init->no_split;
   my @save_sig;
-  foreach my $k ( sort keys %SIG ) {
+  foreach my $k ( keys %SIG ) {
     next unless ref $SIG{$k};
     my $cvref = svref_2object( \$SIG{$k} );
     next if ref($cvref) eq 'B::CV' and $cvref->FILE =~ m|B/C\.pm$|; # ignore B::C SIG warn handler
@@ -7121,18 +5682,12 @@ sub save_sig {
 }
 
 sub force_saving_xsloader {
-  mark_package("XSLoader", 1);
-  # mark_package("DynaLoader", 1);
   if ($] < 5.015003) {
     $init->add("/* force saving of XSLoader::load */");
     eval { XSLoader::load; };
-    # does this really save the whole packages?
-    $dumped_package{XSLoader} = 1;
     svref_2object( \&XSLoader::load )->save;
   } else {
     $init->add("/* custom XSLoader::load_file */");
-    # does this really save the whole packages?
-    $dumped_package{DynaLoader} = 1;
     svref_2object( \&XSLoader::load_file )->save;
     svref_2object( \&DynaLoader::dl_load_flags )->save; # not saved as XSUB constant?
   }
@@ -7158,11 +5713,6 @@ sub save_main_rest {
   # honour -w
   $init->add( "/* honor -w */",
     sprintf "PL_dowarn = ( %s ) ? G_WARN_ON : G_WARN_OFF;", $^W );
-  if ($^{TAINT}) {
-    $init->add( "/* honor -Tt */",
-                "PL_tainting = TRUE;",
-                "PL_taint_warn = ".($^{TAINT} < 0 ? "FALSE" : "TRUE").";"); # -T -1 false, -t 1 true
-  }
 
   # startpoints: XXX TODO push BEGIN/END blocks to modules code.
   warn "Writing initav\n" if $debug{av};
@@ -7194,6 +5744,7 @@ sub save_main_rest {
   # warn "use_xsloader=$use_xsloader\n" if $verbose;
   # If XSLoader was forced later, e.g. in curpad, INIT or END block
   force_saving_xsloader() if $use_xsloader;
+  fixup_ppaddr();
 
   return if $check;
   warn "Writing output\n" if $verbose;
@@ -7252,7 +5803,6 @@ EOT
 sub init_sections {
   my @sections = (
     decl   => \$decl,
-    init0  => \$init0,
     free   => \$free,
     sym    => \$symsect,
     hek    => \$heksect,
@@ -7289,7 +5839,6 @@ sub init_sections {
   }
   $init = new B::C::InitSection 'init', \%symtable, 0;
   $init2 = new B::C::InitSection 'init2', \%symtable, 0;
-  %savINC = %curINC = %INC;
 }
 
 sub mark_unused {
@@ -7301,29 +5850,32 @@ sub mark_skip {
   for (@_) {
     delete_unsaved_hashINC($_);
     # $include_package{$_} = 0;
-    $skip_package{$_} = 1 unless $include_package{$_};
+    $skip_package{$_} = 1;
   }
 }
 
 sub compile {
   my @options = @_;
   # Allow debugging in CHECK blocks without Od
-  $DB::single = 1 if defined &DB::DB;
+  $DB::single=1 if defined &DB::DB;
   my ( $option, $opt, $arg );
   my @eval_at_startup;
-  $B::C::can_delete_pkg = 1;
-  $B::C::save_sig = 1;
   $B::C::destruct = 1;
+  $B::C::stash    = 1;
+  $B::C::save_sig = 1;
   $B::C::stash    = 0;
   $B::C::fold     = 1 if $] >= 5.013009; # always include utf8::Cased tables
   $B::C::warnings = 1 if $] >= 5.013005; # always include Carp warnings categories and B
-  $B::C::optimize_warn_sv = 1 if $^O ne 'MSWin32' or $Config{cc} !~ m/^cl/i;
-  $B::C::dyn_padlist = 1 if $] >= 5.017; # default is dynamic and safe, disable with -O4
-  $B::C::walkall  = 1;
-
+  my %optimization_map = (
+    0 => [qw()],                # special case
+    1 => [qw(-fcog -fppaddr -fwarn-sv -fav-init2)], # falls back to -fav-init
+    2 => [qw(-fro-inc -fsave-data -fdelete-pkg)],
+    3 => [qw(-fno-destruct -fconst-strings -fno-fold -fno-warnings)],
+    4 => [qw(-fcop)],
+  );
   mark_skip qw(B::C B::C::Flags B::CC B::Asmdata B::FAKEOP O
-	       B::Section B::Pseudoreg B::Shadow B::C::InitSection);
-  #mark_skip('DB', 'Term::ReadLine') if defined &DB::DB;
+	       B::Section B::Pseudoreg B::Shadow);
+  #mark_skip('DB', 'Term::ReadLine') if $DB::deep;
 
 OPTION:
   while ( $option = shift @options ) {
@@ -7348,12 +5900,10 @@ OPTION:
     elsif ( $opt eq "D" ) {
       $arg ||= shift @options;
       if ($arg eq 'full') {
-        $arg = 'OcAHCMGSPpsWF';
-        $all_bc_deps{'B::Flags'}++;
+        $arg = 'OcAHCMGSpWF';
       }
       elsif ($arg eq 'ufull') {
-        $arg = 'uOcAHCMGSPpsWF';
-        $all_bc_deps{'B::Flags'}++;
+        $arg = 'uOcAHCMGSpWF';
       }
       foreach my $arg ( split( //, $arg ) ) {
         if (exists $debug_map{$arg}) {
@@ -7365,7 +5915,6 @@ OPTION:
         }
         elsif ( $arg eq "F" ) {
           $debug{flags}++ if $] > 5.008 and eval "require B::Flags;";
-          $all_bc_deps{'B::Flags'}++;
           # $debug{flags}++ if require B::Flags;
         }
         elsif ( $arg eq "r" ) {
@@ -7410,7 +5959,7 @@ OPTION:
     elsif ( $opt eq "u" ) {
       $arg ||= shift @options;
       if ($arg =~ /\.p[lm]$/) {
-	eval "require(\"$arg\");"; # path as string
+	eval "require(\"$arg\");";  # path as string
       } else {
 	eval "require $arg;";      # package as bareword with ::
       }
@@ -7460,7 +6009,7 @@ OPTION:
     $B::C::av_init = 0;
   }
   $B::C::save_data_fh = 1 if $] >= 5.008 and (($] < 5.009004) or $MULTI);
-  $B::C::destruct = 1 if $] < 5.008 or $^O eq 'MSWin32'; # skip -ffast-destruct there
+  $B::C::destruct = 1 if $] < 5.008 or $^O eq 'MSWin32';
 
   init_sections();
   foreach my $i (@eval_at_startup) {
@@ -7597,10 +6146,6 @@ OP Type,Flags,Private
 
 Scalar SVs, prints B<SV/RE/RV> information on saving.
 
-=item B<-DP>
-
-Extra PV information on saving. (static, len, hek, fake_off, ...)
-
 =item B<-Dc>
 
 B<COPs>, prints COPs as processed (incl. file & line num)
@@ -7624,10 +6169,6 @@ prints B<GV> information on saving.
 =item B<-DM>
 
 prints B<MAGIC> information on saving.
-
-=item B<-DR>
-
-prints B<REGEXP> information on saving.
 
 =item B<-Dp>
 
@@ -7662,13 +6203,13 @@ B<disabled>.
 
 =over 4
 
-=item B<-fcog> I<(Ignored)>
+=item B<-fcog>
 
-Future flag to enable Copy-on-grow, i.e Copy-on-write, when perl
-will store the COWREFCNT in a seperate field and not in the string buffer.
+Copy-on-grow: PVs declared and initialised statically.
+Does not work yet with Perl 5.10 and higher unless
+C<-fno-destruct> is added.
 
-Some strings are declared and initialised statically independent
-of C<-fcog>, see C<-fconst-strings> instead.
+Enabled with C<-O1>.
 
 =item B<-fav-init>
 
@@ -7697,9 +6238,9 @@ Enabled with C<-O1>.
 
 =item B<-fwarn-sv>
 
-Use static initialization for cop_warnings. Automatically disabled for MSVC 5.
+Optimize the initialization of cop_warnings.
 
-Disable with C<-fno-warn-sv>.
+Enabled with C<-O1>.
 
 =item B<-fro-inc>
 
@@ -7719,9 +6260,18 @@ enabled automatically where it is known to work.
 
 Enabled with C<-O2>.
 
+=item B<-fdelete-pkg>
+
+Delete packages which appear to be nowhere used automatically.
+This creates smaller executables but might miss run-time called
+methods. Note that you can always use -u to add automatically
+deleted packages.
+
+Enabled with C<-O2>.
+
 =item B<-fconst-strings>
 
-Declares static readonly strings as const.
+Declares readonly strings as const. Enables C<-fcog>.
 Note that readonly strings in eval'd string code will
 cause a run-time failure.
 
@@ -7739,13 +6289,6 @@ This helps with destruction problems of static data in the
 default perl destructor, and enables C<-fcog> since 5.10.
 
 Enabled with C<-O3>.
-
-=item B<-fno-walkall>
-
-C<-fno-walkall> uses the simple old algorithm to detect which packages
-needs to be stored.
-C<-fwalkall> was introduced to catch previously uncompiled packages for
-computed methods or undetected deeper run-time dependencies.
 
 =item B<-fno-save-sig-hash>
 
@@ -7775,40 +6318,17 @@ Enabled with C<-O3>.
 
 Add dynamic creation of stashes, which are nested hashes of symbol tables,
 names ending with C<::>, starting at C<%main::>.
-
 These are rarely needed, sometimes for checking of existance of packages,
 which could be better done by checking C<%INC>, and cost about 10% space and
 startup-time.
 
-If an explicit stash member or the stash itself C<%package::> is used in
-the source code, the requested stash member(s) is/are automatically created.
-
 C<-fno-stash> is the default.
-
-=item B<-fno-delete-pkg>
-
-Do not delete compiler-internal and dependent packages which appear to be
-nowhere used automatically. This might miss run-time called stringified methods.
-See L<B::C::Flags> for C<@deps> which packages are affected.
-
-C<-fdelete-pkg> is the default.
 
 =item B<-fuse-script-name>
 
 Use the script name instead of the program name as C<$0>.
 
 Not enabled with any C<-O> option.
-
-=item B<-fno-dyn-padlist>
-
-Disable dynamic padlists since 5.17.6.  Dynamic padlists are needed to prevent
-from C<cv_undef> crashes on static padlists when cleaning up the stack on non-local
-exits, like C<die> or C<exit>.
-
-All functions in END blocks and all Attribute::Handler function padlists
-are automatically dynamic.
-
-Enabled with C<-O4>.
 
 =item B<-fcop>
 
@@ -7843,7 +6363,7 @@ Note that C<-fcog> without C<-fno-destruct> will be disabled >= 5.10.
 
 =item B<-O2>
 
-Enable B<-O1> plus B<-fro-inc> and B<-fsave-data>.
+Enable B<-O1> plus B<-fro-inc>, B<-fsave-data> and B<-fdelete-pkg>.
 
 =item B<-O3>
 
@@ -7851,8 +6371,8 @@ Enable B<-O2> plus B<-fno-destruct> and B<-fconst-strings>.
 
 =item B<-O4>
 
-Enable B<-O3> plus B<-fcop> and B<-fno-dyn-padlist>.
-Very unsafe, rarely works, 10% faster, 10% smaller.
+Enable B<-O3> plus B<-fcop>. Very unsafe, rarely works,
+10% faster, 10% smaller.
 
 =back
 
@@ -7938,7 +6458,6 @@ This symbol was not resolved during compilation, and replaced by 0.
 
 With B::C this is most likely a critical internal compiler bug, esp. if in
 an op section. See [issue #110].
-
 With B::CC it can be caused by valid optimizations, e.g. when op->next
 pointers were inlined or inlined GV or CONST ops were optimized away.
 
@@ -7946,19 +6465,17 @@ pointers were inlined or inlined GV or CONST ops were optimized away.
 
 =head1 BUGS
 
-Current status: A few known bugs, but usable in production
+Current status: A few known bugs.
 
 5.6:
     reading from __DATA__ handles (15)
     AUTOLOAD xsubs (27)
 
 >=5.10:
-    Attribute::Handlers and run-time attributes
-    @- (#281)
-    compile-time perlio layers
-    run-time loading of DynaLoader packages which use AutoLoad
-      i.e. BSD::Resource. (#308)
-    format STDOUT or STDERR (#285)
+    &XSLoader::load sometimes missing
+    reading from __DATA__ handles (15) non-threaded
+    handling npP magic for shared threaded variables (41-43)
+    destruction of variables in END blocks
 
 =head1 AUTHOR
 
