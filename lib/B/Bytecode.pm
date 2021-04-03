@@ -3,7 +3,7 @@
 # Copyright (c) 1994-1999 Malcolm Beattie. All rights reserved.
 # Copyright (c) 2003 Enache Adrian. All rights reserved.
 # Copyright (c) 2008-2011 Reini Urban <rurban@cpan.org>. All rights reserved.
-# Copyright (c) 2011-2015 cPanel Inc. All rights reserved.
+# Copyright (c) 2011-2016 cPanel Inc. All rights reserved.
 # This module is free software; you can redistribute and/or modify
 # it under the same terms as Perl itself.
 
@@ -13,12 +13,12 @@
 
 package B::Bytecode;
 
-our $VERSION = '1.17';
+our $VERSION = '1.18';
 
 use 5.008;
 use B qw( main_cv main_root main_start
 	  begin_av init_av end_av cstring comppadlist
-	  OPf_SPECIAL OPf_STACKED OPf_MOD
+	  OPf_SPECIAL OPf_STACKED OPf_MOD OPf_KIDS
 	  OPpLVAL_INTRO SVf_READONLY SVf_ROK );
 use B::Assembler qw(asm newasm endasm);
 
@@ -61,19 +61,21 @@ use B::Concise;
 
 #################################################
 
-my $PERL56  = ( $] <  5.008001 );
-my $PERL510 = ( $] >= 5.009005 );
-my $PERL512 = ( $] >= 5.011 );
+my $PERL56  =  ( $] <  5.008001 );
+my $PERL510 =  ( $] >= 5.009005 );
+my $PERL512 =  ( $] >= 5.011 );
 #my $PERL514 = ( $] >= 5.013002 );
-my $PERL518 = ( $] >= 5.017006 );
-my $PERL520 = ( $] >= 5.019002 );
-my $PERL522 = ( $] >= 5.021005 );
+my $PERL518 =  ( $] >= 5.017006 );
+my $PERL520 =  ( $] >= 5.019002 );
+my $PERL522 =  ( $] >= 5.021005 );
+my $CPERL524 = ( $] >= 5.024 and $Config{usecperl} );
 my $DEBUGGING = ($Config{ccflags} =~ m/-DDEBUGGING/);
 our ($quiet, $includeall, $savebegins, $T_inhinc);
 my ( $varix, $opix, %debug, %walked, %files, @cloop );
 my %strtab  = ( 0, 0 );
 my %svtab   = ( 0, 0 );
 my %optab   = ( 0, 0 );
+my %nextop;
 my %spectab = $PERL56 ? () : ( 0, 0 ); # we need the special Nullsv on 5.6 (?)
 my $tix     = $PERL56 ? 0 : 1;
 my %ops     = ( 0, 0 );
@@ -394,6 +396,8 @@ sub B::GV::ix {
         $name = $gv->STASH->NAME . "::"
           . ( B::class($gv) eq 'B::SPECIAL' ? '_' : $gv->NAME );
       }
+      return if $PERL512 and $name eq "Regexp::DESTROY";
+      return if $Config{usecperl} and $name eq "DynaLoader::dl_load_flags";
       nice "[GV $tix]";
       B::Assembler::maxsvix($tix) if $debug{A};
       asm "gv_fetchpvx", cstring $name;
@@ -921,9 +925,8 @@ sub B::HV::bwalk {
       }
     }
     else {
-      if ($] > 5.013005 and $hv->NAME eq 'B') { # see above. omit B prototypes
-	return;
-      }
+      return if $] > 5.013005 and $hv->NAME eq 'B'; # see above. omit B prototypes
+      return if $] > 5.022 and $hv->NAME eq 'Config';
       nice "[prototype $tix]";
       B::Assembler::maxsvix($tix) if $debug{A};
       asm "gv_fetchpvx", cstring ($hv->NAME . "::" . $k);
@@ -947,7 +950,10 @@ sub B::OP::bsave_thin {
     nice '-' . $op->name . '-', asm "ldop", $opix = $ix;
   }
   asm "op_flags",   $op->flags, op_flags( $op->flags ) if $op->flags;
-  asm "op_next",    $nextix;
+  if ($nextix) {
+    asm "op_next", $nextix;
+    $nextop{$$next} = $nextix;
+  }
   asm "op_targ",    $op->targ if $op->type and $op->targ;  # tricky
   asm "op_private", $op->private if $op->private;          # private concise flags?
   if ($] >= 5.017 and $op->can('slabbed')) {
@@ -962,6 +968,12 @@ sub B::OP::bsave_thin {
     }
     elsif ($] >= 5.021011 and $op->can('moresib')) {
       asm "op_moresib", $op->moresib if $op->moresib;
+      if ($CPERL524 and $op->can('typechecked')) {
+        asm "op_typechecked", $op->typechecked if $op->typechecked;
+      }
+      if ($CPERL524 and $op->can('rettype')) {
+        asm "op_rettype", $op->rettype if $op->rettype;
+      }
     }
   }
 }
@@ -988,8 +1000,8 @@ sub B::UNOP::bsave {
     ? $first->ix
     : 0;
 
-  # XXX Are there more new UNOP's with first?
-  $firstix = $first->ix if $name eq 'require'; #issue 97
+  # XXX Are there more new UNOP's with first? all ops with OPf_KIDS
+  $firstix = $first->ix if $op->flags & OPf_KIDS; #$name eq 'require'; #issue 97
   $op->B::OP::bsave($ix);
   asm "op_first", $firstix;
 }
@@ -1026,7 +1038,7 @@ sub B::METHOP::bsave($$) {
 
 sub B::BINOP::bsave($$) {
   my ( $op, $ix ) = @_;
-  if ( $op->name eq 'aassign' && $op->private & B::OPpASSIGN_HASH() ) {
+  if ( $PERL522 or ($op->name eq 'aassign' && $op->private & B::OPpASSIGN_HASH() )) {
     my $last   = $op->last;
     my $lastix = do {
       local *B::OP::bsave   = *B::OP::bsave_fat;
@@ -1035,7 +1047,7 @@ sub B::BINOP::bsave($$) {
       $last->ix;
     };
     asm "ldop", $lastix unless $lastix == $opix;
-    asm "op_targ", $last->targ;
+    asm "op_targ", $last->targ if $last->can('targ');
     $op->B::OP::bsave($ix);
     asm "op_last", $lastix;
   }
@@ -1046,7 +1058,7 @@ sub B::BINOP::bsave($$) {
 
 # not needed if no pseudohashes
 
-*B::BINOP::bsave = *B::OP::bsave if $PERL510;    #VERSION >= 5.009;
+*B::BINOP::bsave = *B::OP::bsave if $PERL510 and !$PERL522;  #VERSION >= 5.009;
 
 # deal with sort / formline
 
@@ -1090,6 +1102,9 @@ sub B::LISTOP::bsave($$) {
     require AnyDBM_File;
     $op->B::OP::bsave($ix);
   }
+  elsif ($PERL522) {
+    $op->B::BINOP::bsave($ix);
+  }
   else {
     $op->B::OP::bsave($ix);
   }
@@ -1127,7 +1142,6 @@ sub B::OP::bsave_fat($$) {
 sub B::UNOP::bsave_fat {
   my ( $op, $ix ) = @_;
   my $firstix = $op->first->ix;
-
   $op->B::OP::bsave($ix);
   asm "op_first", $firstix;
 }
@@ -1135,8 +1149,8 @@ sub B::UNOP::bsave_fat {
 sub B::BINOP::bsave_fat {
   my ( $op, $ix ) = @_;
   my $last   = $op->last;
-  my $lastix = $op->last->ix;
-  bwarn( B::peekop($op), ", ix: $ix $last: $last, lastix: $lastix" )
+  my $lastix = $last->ix;
+  bwarn( B::peekop($op), ", ix: $ix last: $last, lastix: $lastix" )
     if $debug{o};
   if ( !$PERL510 && $op->name eq 'aassign' && $last->name eq 'null' ) {
     asm "ldop", $lastix unless $lastix == $opix;
@@ -1309,12 +1323,20 @@ sub B::OP::opwalk {
     my $ix;
     my @oplist = ($PERL56 and $op->isa("B::COP"))
       ? () : $op->oplist; # 5.6 may be called by a COP
-    push @cloop, undef;
+    push @cloop, undef; # end marker
+    # note that unop,binop,listop first/last are missing from oplist,
+    # only logop and loop ops are pushed.
     $ix = $_->ix while $_ = pop @oplist;
     #print "\n# rest of cloop\n";
     while ( $_ = pop @cloop ) {
-      asm "ldop",    $optab{$$_};
-      asm "op_next", $optab{ ${ $_->next } };
+      asm "ldop", $optab{$$_};
+      my $nextix = $optab{ ${ $_->next } };
+      if ($nextix) {
+        if (!exists $nextop{$$_}) {
+          asm "op_next", $nextix;
+          $nextop{$$_} = $nextix;
+        }
+      }
     }
     $ix;
   }
@@ -1440,6 +1462,8 @@ sub compile {
     #*B::PMOP::bsave   = *B::PMOP::bsave_fat;
   }
   sub bwarn { print STDERR "Bytecode.pm: @_\n" unless $quiet; }
+
+  #keep_syn() if $PERL522;
 
   for (@_) {
     if (/^-q(q?)/) {
@@ -1765,7 +1789,7 @@ modified by Benjamin Stuhl <sho_pi@hotmail.com>.
 
 Rewritten by Enache Adrian <enache@rdslink.ro>, 2003 a.d.
 
-Enhanced by Reini Urban <rurban@cpan.org>, 2008-2012
+Enhanced by Reini Urban <rurban@cpan.org>, 2008-2016
 
 =cut
 
