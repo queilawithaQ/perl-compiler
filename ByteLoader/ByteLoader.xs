@@ -1,8 +1,8 @@
 /* This loads bytecode in .plc files starting with PLBC.
-   Produced by the B::Bytecode compiler.
+   Produce by the B::Bytecode compiler.
 
-   It might also be useful for JIT or ASM compiled
-   PLJC .plc files where a full PE/COFF or MACHO/ELF format is not
+   It might also be useful to use it for JIT or Asm compiled
+   PLJC .plc files where a full PE/COFF or elf format is not
    supported nor wanted, jumps are not patched,
    or a full executable dump is not possible.
 */
@@ -94,19 +94,19 @@ byteloader_filter(pTHX_ int idx, SV *buf_sv, int maxlen)
 
     data.next_out = 0;
     data.datasv = FILTER_DATA(idx);
+    #if (PERL_VERSION > 6)
     /* [perl #86186] Using tell(DATA) within __DATA__ file buffer is broken on Win32:
        Source filters were changed with 5.14 to read DATA in textmode, so \r\n are
        changed to \n on Windows only in our binary data.
      */
-#if (PERL_VERSION < 17) && (PERL_VERSION > 7)
     PerlIO_binmode(aTHX_ PL_RSFP, IoTYPE_RDONLY, O_BINARY, 0);
-#endif
+    #endif
     data.idx = idx;
 
     bstate.bs_fdata = &data;
     bstate.bs_obj_list = Null(void**);
     bstate.bs_obj_list_fill = -1;
-    bstate.u.bs_sv = Nullsv;
+    bstate.bs_sv = Nullsv;
     bstate.bs_iv_overflows = 0;
 
 /* KLUDGE */
@@ -134,13 +134,7 @@ byteloader_filter(pTHX_ int idx, SV *buf_sv, int maxlen)
         PL_main_root = saveroot;
         PL_main_start = savestart;
     }
-    /* Proof for [cperl #75] that newPROG() overwrites our main_start */
-#if PERL_VERSION > 21 && defined(DEBUGGING)
-    if (DEBUG_t_TEST_ && DEBUG_v_TEST_) {
-      op_dump(PL_main_start);
-      op_dump(PL_main_start->op_next);
-    }
-#endif
+
     return 0;
 }
 
@@ -149,7 +143,8 @@ MODULE = ByteLoader		PACKAGE = ByteLoader
 PROTOTYPES:	ENABLE
 
 void
-import(...)
+import(package="ByteLoader", ...)
+  char *package
   PREINIT:
     SV *sv = newSVpvn ("", 0);
   PPCODE:
