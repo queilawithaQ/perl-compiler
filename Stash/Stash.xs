@@ -12,7 +12,7 @@ CvIsXSUB(cvname)
         SV* cvname;
    CODE:
 	CV *cv;
-#if PERLVERSION < 7
+#if PERL_VERSION < 8 || ((PERL_VERSION == 8) && (PERL_SUBVERSION < 9))
 	GV *const gv = gv_fetchpv(SvPVX(cvname), 0, SVt_PVCV);
 #else
 	GV *const gv = gv_fetchsv(cvname, 0, SVt_PVCV);
@@ -20,7 +20,7 @@ CvIsXSUB(cvname)
 	RETVAL = FALSE;
 	if (gv && (cv = GvCV(gv))) {
 	  if (CvXSUB(cv)) {
-#if PERLVERSION < 7
+#if PERL_VERSION < 7
 	    RETVAL = TRUE;
 #else
 	    if (!(CvFLAGS(cv) & CVf_CONST) || (CvFLAGS(cv) & CVf_ANON)) {

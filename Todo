@@ -1,39 +1,34 @@
 * Fixes
 
-BC_heavy: sanify INC before the compilers pollute them (toddr,atoomic)
-attribute handlers (i.e. run-time attributes)
-compile-time perlio layers (e.g. use open ...)
-compile-time re-eval groups (?{})
-smartmatch subrefs
-compile-time stash-magic delete renames to ANON
-use bytes AUTOLOAD handling
-CvOUTSIDE for ordinary subs
+-DF Flags crashes with newpkg
+do not throw away non-B:C loaded packages not to miss run-time added methods ('all_bc_pkg')
+'n' magic (shared_scalar on 5.10.0 and earlier perls) e.g. t/testm.sh Test::Tester
+run-time label lookup (done for the easy and documented limitations)
+store_cop_label for 5.12 windows/AIX only (=> p5p; needs CORE patch)
 
-CC backend: goto (needs test), some recursive calls fail
+CC backend: goto (needs test), 
+
+improve XSUB handling (perlcc, both static and dynamic, needs tests)
+sv_magic can do SvREFCNT_inc(obj) which messes up precalculated refcounts
+allocation of XPV[INAHC]V structures needs fixing: Perl tries to free
+  them, whereas the compiler expects them to be linked to a xpv[inahc]v_root
+list the same as X[IPR]V structures.
+ref counts
+perl_parse replacement
+NV overflow initialisation analog to ivx (ExtUtils::CBuilder)
+CvOUTSIDE for ordinary subs
 
 * Features
 
-modularize (-m) for faster link times, buildcc, rperl integration
-    (branch modul)
-    * add new build tool which takes module names and paths from the
-      compiler, check timestamps and create/update compiled modules.
-    * filter out non-module related code in the compiler by looking at
-      the CopFILE.
-backport improvements from oldmaster:
-  do not define symbols which are arguments of define (destructive
-   check)
-  store static bless packagenames
-run-time label lookup (fixed)
-skip code after BEGIN goto (usually Carp including B in some AUTOLOAD block, issue 61)
-type checking: Devel::TypeCheck
-compile time v. runtime initialisation (done):
-  execute run-time BEGIN blocks for side-effects such as print or chdir, 
-  use and require not.
-save PMOPs in compiled form (5.10thr missing)
-selection of what to dump (done)
-options for cutting out line info (COP elimination) etc. (-fcop, sortcv's)
-shared constants: share_hek, constpv (done)
-check module dependencies, vs. link libs static, not via DynaLoader (done)
+improve detection method of needed method classes (newpkg), maybe not needed 
+  if all_bc_pkg is good enough
+optimize static or typed method calls. How-perl-compiles-subs-and-methods.md
+detect typed objects (my Class $obj = new Class;)
+modularize (-m) for faster link times
+BEGIN goto optim: skip code after BEGIN goto
+  usually Carp including B in some AUTOLOAD block, issue 61
+save PMOPs in compiled form (?)
+options for cutting out line info (COP elimination) etc. (fix -fcop)
 check Bytecode op coverage in the tests, should cover all ops 0-142
 ByteLoader compatibility: version, platform. eventually Bytecode version 
   portability (test with 5.6 on cygwin, partially done)
@@ -41,15 +36,9 @@ check CC op coverage, add tests
 
 * Optimizations
 
--fro-inc read-only INC paths. not the AV, run-time savepvn (done)
--fno-destruct skip optree and sv destruction at all, leave it to the OS (done)
 collect static strings beforehand, such as GvNAMEs, COP FILENAME (for pre 5.10)
-  and GV method names package::name. (done)
+  and GV method names package::name. (partially done)
 proper static init of PMOP SV's (only works dynamic >= 5.10)
-proper static init of PVBM/FBM (done)
-compile-time initialisation of AvARRAYs (improved with -fav-init and
-   -fav-init2)
-
 collapse LISTOPs to UNOPs or BASEOPs
 compile-time qw(), constant subs
 variable types: global analysis of variables, type hints etc.
@@ -63,4 +52,3 @@ demand-loaded bytecode (leader of each basic block replaced by an op
   which loads in bytecode for its block)
 fast sub calls for CC backend
 tailcall optimization (entersub -> leavesub => goto)
-inline more small pp ops: enter, reset, stringify, ... (CC -finline-ops)

@@ -3,151 +3,100 @@
 use Test::More;
 use strict;
 BEGIN {
-  if ($ENV{PERL_CORE}) {
-    unshift @INC, ('t', '../../lib');
-  } else {
-    unshift @INC, 't';
-  }
-  require TestBC;
+  unshift @INC, 't';
+  require "test.pl";
 }
 
 use Config;
 use File::Spec;
 use Time::HiRes qw(gettimeofday tv_interval);
 
-sub faster { ($_[1] - $_[0]) < 0.05 }
-sub diagv {
-  diag @_ if $ENV{TEST_VERBOSE};
-}
-sub todofaster {
-  my ($t1, $t2, $cmt) = @_;
-  if (faster($t1,$t2)) {
-    ok(1, $cmt);
-  } else {
-  TODO: {
-      # esp. with $ENV{HARNESS_ACTIVE}
-      local $TODO = " (unreliable timings with parallel testing)";
-      ok(0, $cmt);
-    }
-  }
-}
+sub faster { ($_[1] - $_[0]) < 0.01 }
 
 my $X = $^X =~ m/\s/ ? qq{"$^X"} : $^X;
-my $Mblib = Mblib();
 my $perldoc = File::Spec->catfile($Config{installbin}, 'perldoc');
-if ($ENV{PERL_CORE}) {
-  $perldoc = File::Spec->catfile(
-    '..','..','utils', ($Config{usecperl} ? 'cperldoc' : 'perldoc'));
-  $X .= ' -I../../pod';
-}
-my $perlcc = "$X $Mblib script/perlcc";
+my $perlcc = $] < 5.008
+  ? "$X -Iblib/arch -Iblib/lib blib/script/perlcc"
+  : "$X -Mblib blib/script/perlcc";
 $perlcc .= " -Wb=-fno-fold,-fno-warnings" if $] > 5.013;
-$perlcc .= " -UB -uFile::Spec -uCwd";
-$perlcc .= " -uPod::Perldoc::ToText" if $] >= 5.023004;
-#$perlcc .= " -uFile::Temp" if $] > 5.015;
-$perlcc .= " -uExporter" if $] < 5.010;
-my $has_flto = $Config{ccflags} =~ /-flto/ ? 1 : 0;
-
-# XXX bother File::Which?
-plan skip_all => "$perldoc not found" unless -f $perldoc;
-plan skip_all => "MSVC" if ($^O eq 'MSWin32' and $Config{cc} eq 'cl');
-plan skip_all => "mingw" if ($^O eq 'MSWin32' and $Config{cc} eq 'gcc'); # fail 1,4
-plan skip_all => "-flto too slow" if $ENV{PERL_CORE} and $has_flto;
-plan tests => 7;
-
-$perlcc .= " --Wc=-O1" if $has_flto;
+$perlcc .= " -UB";
+#        .  " -uPod::Perldoc::ToMan -uPod::Perldoc::ToText -uPod::Perldoc::BaseTo";
 my $exe = $Config{exe_ext};
 my $perldocexe = $^O eq 'MSWin32' ? "perldoc$exe" : "./perldoc$exe";
-
-my $strip_banner = 0;
-# check if we need to strip 1st and last line. Needed for 5.18-5.20
-sub strip_banner($) {
-  my $s = shift;
-  $s =~ s/^.* User Contributed Perl Documentation (.*?)$//m;
-  $s =~ s/^perl v.*$//m;
-  return $s;
-}
-
-my ($compile, $res, $result, $ori, $out, $err, $t0, $t1, $t2);
+# XXX bother File::Which?
+die "1..1 # $perldoc not found\n" unless -f $perldoc;
+plan tests => 7;
 
 # XXX interestingly 5.8 perlcc cannot compile perldoc because Cwd disturbs the method finding
-# vice versa 5.14 cannot compile perldoc manually because File::Temp is not included
-$compile = "$perlcc -o $perldocexe $perldoc";
-diagv $compile;
-$res = `$compile`;
+# vice versa 5.14 cannot be compile perldoc manually because File::Temp is not included
+my $compile = $]<5.010?"$X -Mblib -MO=C,-UB,-operldoc.c $perldoc":"$perlcc -o $perldocexe $perldoc";
+diag $compile;
+my $res = `$compile`;
+system("$X -Mblib script/cc_harness -o $perldocexe perldoc.c") if $] < 5.010;
 ok(-s $perldocexe, "$perldocexe compiled"); #1
+diag $res unless -s $perldocexe;
 
-diagv "see if $perldoc -T works";
+diag "see if $perldoc -T works";
 my $T_opt = "-T -f wait";
+my $ori;
 my $PAGER = '';
-$t0 = [gettimeofday];
+my ($result, $out, $err);
+my $t0 = [gettimeofday];
 if ($^O eq 'MSWin32') {
   $T_opt = "-t -f wait";
   $PAGER = "PERLDOC_PAGER=type ";
   ($result, $ori, $err) = run_cmd("$PAGER$X -S $perldoc $T_opt", 20);
 } else {
-  ($result, $ori, $err) = run_cmd("$X -S $perldoc $T_opt", 20);
+  ($result, $ori, $err) = run_cmd("$X -S $perldoc $T_opt 2>&1", 20);
 }
-$t1 = tv_interval( $t0 );
+my $t1 = tv_interval( $t0 );
 if ($ori =~ /Unknown option/) {
   $T_opt = "-t -f wait";
   $PAGER = "PERLDOC_PAGER=cat " if $^O ne 'MSWin32';
-  diagv "No, use $PAGER instead";
+  diag "No, use $PAGER instead";
   $t0 = [gettimeofday];
   ($result, $ori, $err) = run_cmd("$PAGER$X -S $perldoc $T_opt", 20);
   $t1 = tv_interval( $t0 );
 } else {
-  diagv "it does";
+  diag "it does";
 }
-
-if ($ori =~ / User Contributed Perl Documentation /) {
-  $strip_banner++;
-  $ori = strip_banner $ori;
-}
-
 $t0 = [gettimeofday];
 ($result, $out, $err) = run_cmd("$PAGER $perldocexe $T_opt", 20);
-$t2 = tv_interval( $t0 );
-# old perldoc 3.14_04-3.15_04: Can't locate object method "can" via package "Pod::Perldoc" at /usr/local/lib/perl5/5.14.1/Pod/Perldoc/GetOptsOO.pm line 34
-# dev perldoc 3.15_13: Can't locate object method "_is_mandoc" via package "Pod::Perldoc::ToMan"
-$ori =~ s{ /\S*perldoc }{ perldoc };
-$out =~ s{ ./perldoc }{ perldoc };
-$out = strip_banner $out if $strip_banner;
-if ($] > 5.023 and $out ne $ori) {
-  ok(1, "TODO 5.24 Pod::Simple");
-} else {
+my $t2 = tv_interval( $t0 );
+TODO: {
+  # old perldoc 3.14_04-3.15_04: Can't locate object method "can" via package "Pod::Perldoc" at /usr/local/lib/perl5/5.14.1/Pod/Perldoc/GetOptsOO.pm line 34
+  # dev perldoc 3.15_13: Can't locate object method "_is_mandoc" via package "Pod::Perldoc::ToMan"
+  local $TODO = "compiled does not print yet";
   is($out, $ori, "same result"); #2
 }
 
 SKIP: {
   skip "cannot compare times", 1 if $out ne $ori;
-  todofaster($t1,$t2,"compiled faster than uncompiled: $t2 < $t1"); #3
+  ok(faster($t1,$t2), "compiled faster than uncompiled: $t2 < $t1"); #3
 }
 
 unlink $perldocexe if -e $perldocexe;
 $perldocexe = $^O eq 'MSWin32' ? "perldoc_O3$exe" : "./perldoc_O3$exe";
-$compile = "$perlcc -O3 -o $perldocexe $perldoc";
-diagv $compile;
+$compile = $]<5.010?"$X -Mblib -MO=C,-O3,-UB,-operldoc.c $perldoc":"$perlcc -O3 -o $perldocexe $perldoc";
+diag $compile;
 $res = `$compile`;
+system("$X -Mblib script/cc_harness -o $perldocexe perldoc.c") if $] < 5.010;
 ok(-s $perldocexe, "perldoc compiled"); #4
 unlink "perldoc.c" if $] < 5.10;
-diagv $res unless -s $perldocexe;
+diag $res unless -s $perldocexe;
 
 $t0 = [gettimeofday];
 ($result, $out, $err) = run_cmd("$PAGER $perldocexe $T_opt", 20);
 my $t3 = tv_interval( $t0 );
-$out =~ s{ ./perldoc_O3 }{ perldoc };
-$out = strip_banner $out if $strip_banner;
-if ($] > 5.023 and $out ne $ori) {
-  ok(1, "TODO 5.24 Pod::Simple");
-} else {
+TODO: {
+  local $TODO = "compiled does not print yet";
   is($out, $ori, "same result"); #5
 }
 
 SKIP: {
   skip "cannot compare times", 2 if $out ne $ori;
-  todofaster($t2,$t3,"compiled -O3 not slower than -O0: $t3 <= $t2"); #6
-  todofaster($t1,$t3,"compiled -O3 faster than uncompiled: $t3 < $t1"); #7
+  ok(faster($t2,$t3), "compiled -O3 not slower than -O0: $t3 <= $t2"); #6
+  ok(faster($t1,$t3), "compiled -O3 faster than uncompiled: $t3 < $t1"); #7
 }
 
 END {
