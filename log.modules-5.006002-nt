@@ -1,11 +1,11 @@
-# B::C::VERSION = 1.42 52c6dfb 2012-02-07 | Update Todo
+# B::C::VERSION = 1.43 7c5d5fb 2012-11-08 | C: improve XSLoader::load_file Config::Config->{dlext} and padop_name returning undef
 # perlversion = 5.008004d-nt
 # path = /usr/local/bin/perl5.8.4d-nt
 # platform = linux 64bit non-threaded debug
 pass Exporter
 pass Text::Tabs
 pass Text::Wrap
-pass Test::Harness
+fail Test::Harness
 pass Pod::Escapes
 pass Pod::Simple
 pass IO
@@ -23,9 +23,9 @@ pass File::Spec
 pass File::Temp
 pass ExtUtils::Install
 pass Text::ParseWords
-pass ExtUtils::CBuilder
+fail ExtUtils::CBuilder
 pass ExtUtils::ParseXS
-pass Module::Build
+fail Module::Build #TODO overlong linking time
 pass File::Path
 pass XSLoader
 pass MIME::Base64
@@ -40,7 +40,7 @@ pass Net::Cmd
 pass Compress::Raw::Zlib
 pass Compress::Raw::Bzip2
 pass IO::Compress::Base
-pass LWP
+fail LWP
 pass Storable
 pass base
 pass List::MoreUtils
@@ -52,7 +52,7 @@ pass Sub::Install
 pass Attribute::Handlers
 pass Data::OptList
 pass Sub::Exporter
-pass Test::NoWarnings
+pass Test::NoWarnings #TODO print() on unopened filehandle $Testout
 pass version
 pass Params::Validate
 pass Sub::Name
@@ -65,14 +65,14 @@ pass Time::HiRes
 pass Class::Data::Inheritable
 pass Try::Tiny
 pass Devel::GlobalDestruction
-pass Class::MOP
-pass Moose
+fail Class::MOP
+fail Moose
 pass Test::Deep
 pass Carp::Clan
 pass Module::Pluggable
 pass if(1) => "Sys::Hostname"
 pass Text::Balanced
-pass DBI
+fail DBI
 pass Time::Local
 skip IO::Scalar
 pass Sub::Identify
@@ -83,7 +83,7 @@ pass Path::Class
 pass Test::Warn
 pass Encode
 pass Variable::Magic
-pass CGI
+fail CGI
 pass B::Hooks::EndOfScope
 pass Test::Pod
 pass Digest::SHA1
@@ -95,15 +95,15 @@ pass XML::SAX
 pass YAML
 skip MooseX::Types
 pass Class::Singleton
-pass DateTime::TimeZone
-pass DateTime::Locale
-pass DateTime
+fail DateTime::TimeZone
+fail DateTime::Locale
+fail DateTime
 pass IO::String
 pass AppConfig
 pass UNIVERSAL::require
 pass Template::Stash
-# 98 / 100 modules tested with B-C-1.42 - perl-5.008004d-nt
-# pass  98 /  98 (100.0%)
-# fail   0 /  98 (0.0%)
-# todo   0 /   0 ()
+# 98 / 100 modules tested with B-C-1.43 - perl-5.008004d-nt
+# pass  87 /  98 (88.8%)
+# fail  11 /  98 (11.2%)
+# todo   2 /  11 (18.2%)
 # skip   2 / 100 (2.0% not installed)

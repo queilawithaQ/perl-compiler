@@ -6,7 +6,7 @@
 #      You may distribute under the terms of either the GNU General Public
 #      License or the Artistic License, as specified in the README file.
 
-$B::Disassembler::VERSION = '1.13';
+$B::Disassembler::VERSION = '1.11';
 
 package B::Disassembler::BytecodeStream;
 
@@ -216,13 +216,12 @@ sub GET_pmflags {
 package B::Disassembler;
 use Exporter;
 @ISA       = qw(Exporter);
-our @EXPORT_OK = qw(disassemble_fh get_header print_insn print_insn_bare @opname);
+@EXPORT_OK = qw(disassemble_fh get_header print_insn print_insn_bare @opname);
 use Carp;
 use strict;
 use B::Asmdata qw(%insn_data @insn_name);
 use Opcode qw(opset_to_ops full_opset);
 use Config qw(%Config);
-use B::Concise;
 
 BEGIN {
   if ( $] < 5.009 ) {
@@ -234,7 +233,6 @@ BEGIN {
 }
 
 my $ix;
-my $opname;
 our @opname = opset_to_ops(full_opset);
 our (
   $magic,   $archname, $blversion, $ivsize,
@@ -242,12 +240,10 @@ our (
 );
 						# >=5.12
 our  @svnames = ("NULL");			# 0
-push @svnames, "BIND"   if $] >= 5.009 and $] < 5.019002; # 1
+push @svnames, "BIND"   if $] >= 5.009;	# 1
 push @svnames, ("IV", "NV");			# 2,3
 push @svnames, "RV"     if $] < 5.011;		#
-push @svnames, "PV";
-push @svnames, "INVLIST" if $] >= 5.019002;     # 4
-push @svnames, ("PVIV", "PVNV", "PVMG");	# 4-7
+push @svnames, ("PV", "PVIV", "PVNV", "PVMG");	# 4-7
 push @svnames, "BM"     if $] < 5.009;
 push @svnames, "REGEXP" if $] >= 5.011;	# 8
 push @svnames, "GV"     if $] >= 5.009;	# 9
@@ -319,16 +315,15 @@ sub print_insn {
     if ( $insn eq 'newopx' or $insn eq 'ldop' and $] > 5.007) {
       my $type = $arg >> 7;
       my $size = $arg - ( $type << 7 );
-      $arg .= sprintf( " \t# size:%d, type:%d %s", $size, $type) if $comment;
-      $opname = $opname[$type];
-      printf "\n# [%s %d]\n", $opname, $ix++;
+      $arg .= sprintf( " \t# size:%d, type:%d %s", $size, $type ) if $comment;
+      printf "\n# [%s %d]\n", $opname[$type], $ix++;
+    }
+    elsif ( $insn eq 'newpadlx' ) {
+      $arg .= "\t# " . $comment if $comment ne '1';
+      printf "\n# [%s %d]\n", "PADLIST", $ix++;
     }
     elsif ( !$comment ) {
       ;
-    }
-    elsif ( $insn eq 'comment' ) {
-      $arg .= "comment $arg";
-      $arg .= " \t#" . $comment if $comment ne '1';
     }
     elsif ( $insn eq 'stpv' ) {
       $arg .= "\t# " . $comment if $comment ne '1';
@@ -339,18 +334,6 @@ sub print_insn {
       $arg .= sprintf("\t# type=%d,flags=0x%x", $type, $arg);
       $arg .= $comment if $comment ne '1';
       printf "\n# [%s %d]\n", $svnames[$type], $ix++;
-    }
-    elsif ( $insn eq 'newpadlx' ) {
-      $arg .= "\t# " . $comment if $comment ne '1';
-      printf "\n# [%s %d]\n", "PADLIST", $ix++;
-    }
-    elsif ( $insn eq 'newpadnlx' ) {
-      $arg .= "\t# " . $comment if $comment ne '1';
-      printf "\n# [%s %d]\n", "PADNAMELIST", $ix++;
-    }
-    elsif ( $insn eq 'newpadnx' ) {
-      $arg .= "\t# " . $comment if $comment ne '1';
-      printf "\n# [%s %d]\n", "PADNAME", $ix++;
     }
     elsif ( $insn eq 'gv_stashpvx' ) {
       $arg .= "\t# " . $comment if $comment ne '1';
@@ -373,14 +356,7 @@ sub print_insn {
       $arg .= sprintf( "\t# '%s'", chr($arg) );
     }
     elsif ( $insn =~ /_flags/ ) {
-      my $f = $arg;
-      $arg .= sprintf( "\t# 0x%x", $f ) if $comment;
-      $arg .= " ".B::Concise::op_flags($f) if $insn eq 'op_flags' and $comment;
-    }
-    elsif ( $comment and $insn eq 'op_private' ) {
-      my $f = $arg;
-      $arg .= sprintf( "\t# 0x%x", $f );
-      $arg .= " ".B::Concise::private_flags($opname, $f);
+      $arg .= sprintf( "\t# 0x%x", $arg );
     }
     elsif ( $insn eq 'op_type' and $] < 5.007 ) {
       my $type = $arg;
@@ -435,7 +411,6 @@ sub disassemble_fh {
       warn "Illegal instruction code $c at stream offset $pos.\n";
     }
     $getmeth = $insn_data{$insn}->[2];
-    #warn "EOF at $insn $getmeth" if $fh->eof();
     $arg     = $fh->$getmeth();
     if ( defined($arg) ) {
       &$out( $insn, $arg, $verbose );

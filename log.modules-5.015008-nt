@@ -1,7 +1,7 @@
-# B::C::VERSION = 1.42_07 a9b3612 2012-04-13 | i71_3 hangs also with DEBUGGING <5.10
-# perlversion = 5.015007d-nt
-# path = /usr/local/bin/perl5.15.7d-nt@8129baca
-# platform = linux 64bit non-threaded debug
+# B::C::VERSION = 1.42_07 6354acf 2012-03-02 | .gdbinit: better generic macros, even with help
+# perlversion = 5.015008-nt
+# path = /usr/local/bin/perl5.15.8-nt
+# platform = linux 64bit non-threaded
 pass Exporter
 pass Text::Tabs
 pass Text::Wrap
@@ -25,6 +25,7 @@ pass ExtUtils::Install
 pass Text::ParseWords
 pass ExtUtils::CBuilder
 pass ExtUtils::ParseXS
+fail Module::Build #TODO > 5.15 without threads
 pass File::Path
 pass XSLoader
 pass MIME::Base64
@@ -101,8 +102,8 @@ pass IO::String
 pass AppConfig
 pass UNIVERSAL::require
 pass Template::Stash
-# 99 / 99 modules tested with B-C-1.42_07 - perl-5.015007d-nt
-# pass  99 /  99 (100.0%)
-# fail   0 /  99 (0.0%)
-# todo   1 /   0 ()
-# skip   0 /  99 (0.0% not installed)
+# 100 / 100 modules tested with B-C-1.42_07 - perl-5.015008-nt
+# pass  99 / 100 (99.0%)
+# fail   1 / 100 (1.0%)
+# todo   2 /   1 (200.0%)
+# skip   0 / 100 (0.0% not installed)

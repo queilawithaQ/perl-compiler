@@ -2,7 +2,6 @@
 #
 #      Copyright (c) 1996 Malcolm Beattie
 #      Copyright (c) 2008,2009,2010,2011,2012 Reini Urban
-#      Copyright (c) 2014 cPanel Inc
 #
 #      You may distribute under the terms of either the GNU General Public
 #      License or the Artistic License, as specified in the README file.
@@ -17,8 +16,8 @@ require ByteLoader;    # we just need its $VERSION
 no warnings;           # XXX
 
 @ISA       = qw(Exporter);
-our @EXPORT_OK = qw(assemble_fh newasm endasm assemble asm maxopix maxsvix);
-our $VERSION   = '1.14';
+@EXPORT_OK = qw(assemble_fh newasm endasm assemble asm maxopix maxsvix);
+$VERSION   = '1.11';
 
 use strict;
 my %opnumber;
@@ -57,7 +56,6 @@ sub limcheck($$$$) {
 #
 
 sub B::Asmdata::PUT_U8 {
-  error "Missing argument to PUT_U8" if @_ < 1;
   my $arg = shift;
   my $c   = uncstring($arg);
   if ( defined($c) ) {
@@ -74,31 +72,26 @@ sub B::Asmdata::PUT_U8 {
 }
 
 sub B::Asmdata::PUT_U16 {
-  error "Missing argument to PUT_U16" if @_ < 1;
   my $arg = limcheck( $_[0], 0, 0xffff, 'U16' );
   pack( "S", $arg );
 }
 
 sub B::Asmdata::PUT_U32 {
-  error "Missing argument to PUT_U32" if @_ < 1;
   my $arg = limcheck( $_[0], 0, 0xffffffff, 'U32' );
   pack( "L", $arg );
 }
 
 sub B::Asmdata::PUT_I32 {
-  error "Missing argument to PUT_I32" if @_ < 1;
   my $arg = limcheck( $_[0], -0x80000000, 0x7fffffff, 'I32' );
   pack( "l", $arg );
 }
 
 sub B::Asmdata::PUT_NV {
-  error "Missing argument to PUT_NV" if @_ < 1;
   sprintf( "%s\0", $_[0] );
 }    # "%lf" looses precision and pack('d',...)
      # may not even be portable between compilers
 
 sub B::Asmdata::PUT_objindex {    # could allow names here
-  error "Missing argument to PUT_objindex" if @_ < 1;
   my $maxidx = $_[1] || 0xffffffff;
   my $what = $_[2] || 'ix';
   my $arg = limcheck( $_[0], 0, $maxidx, $what );
@@ -110,13 +103,12 @@ sub B::Asmdata::PUT_pvindex { B::Asmdata::PUT_objindex( @_, $maxsvix, 'pvix' ) }
 sub B::Asmdata::PUT_hekindex { B::Asmdata::PUT_objindex( @_ ) }
 
 sub B::Asmdata::PUT_strconst {
-  error "Missing argument to PUT_strconst" if @_ < 1;
   my $arg = shift;
   my $str = uncstring($arg);
   if ( !defined($str) ) {
-    my @callstack = caller(3);
+    my @callstack = caller(1);
     error "bad string constant: '$arg', called from ".$callstack[3]
-      ." line:".$callstack[2] unless $callstack[3] eq 'B::PADNAME::ix'; # empty newpadnx
+      ." line:".$callstack[2];
     $str = '';
   }
   if ( $str =~ s/\0//g ) {
@@ -126,15 +118,13 @@ sub B::Asmdata::PUT_strconst {
   return $str . "\0";
 }
 
-# expects the string argument already on the "stack" (with depth 1, one sv)
 sub B::Asmdata::PUT_pvcontents {
   my $arg = shift;
-  error "extraneous argument to pvcontents: $arg" if defined $arg;
+  error "extraneous argument: $arg" if defined $arg;
   return "";
 }
 
 sub B::Asmdata::PUT_PV {
-  error "Missing argument to PUT_PV" if @_ < 1;
   my $arg = shift;
   my $str = uncstring($arg);
   if ( !defined($str) ) {
@@ -153,10 +143,7 @@ sub B::Asmdata::PUT_comment_t {
   }
   return $arg . "\n";
 }
-sub B::Asmdata::PUT_double {
-  error "Missing argument to PUT_double" if @_ < 1;
-  sprintf( "%s\0", $_[0] )
-}    # see PUT_NV above
+sub B::Asmdata::PUT_double { sprintf( "%s\0", $_[0] ) }    # see PUT_NV above
 
 sub B::Asmdata::PUT_none {
   my $arg = shift;
@@ -165,13 +152,11 @@ sub B::Asmdata::PUT_none {
 }
 
 sub B::Asmdata::PUT_op_tr_array {
-  error "Missing argument to PUT_tr_array" if @_ < 1;
   my @ary = split /\s*,\s*/, shift;
   return pack "S*", @ary;
 }
 
 sub B::Asmdata::PUT_IV64 {
-  error "Missing argument to PUT_IV64" if @_ < 1;
   return pack "Q", shift;
 }
 
@@ -282,19 +267,15 @@ sub gen_header {
 sub gen_header_hash {
   my $header  = {};
   my $blversion = "$ByteLoader::VERSION";
-  my $cmpversion = $blversion;
   #if ($] < 5.009 and $blversion eq '0.06_01') {
   #  $blversion = '0.06';# fake the old backwards compatible version
   #}
-  if ($] < 5.007 and $blversion eq '4.e-02') {
-    $cmpversion = '0.04';
-  }
   $header->{magic}     = 0x43424c50;
   $header->{archname}  = $Config{archname};
   $header->{blversion} = $blversion;
   $header->{ivsize}    = $Config{ivsize};
   $header->{ptrsize}   = $Config{ptrsize};
-  if ( $cmpversion ge "0.06_03" ) {
+  if ( $blversion ge "0.06_03" ) {
     $header->{longsize} = $Config{longsize};
   }
   my $byteorder = $Config{byteorder};
@@ -313,15 +294,14 @@ sub gen_header_hash {
     }
   }
   $header->{byteorder}   = $byteorder;
-  if ( $cmpversion ge "0.06_05" ) {
+  if ( $blversion ge "0.06_05" ) {
     my $archflag = 0;
     $archflag += 1 if $Config{useithreads};
     $archflag += 2 if $Config{usemultiplicity};
     $header->{archflag} = $archflag;
   }
-  if ( $cmpversion ge "0.06_06" ) {
+  if ( $blversion ge "0.06_06" ) {
     $header->{perlversion} = $];
-    $header->{perlversion} .= 'c' if $Config{usecperl};
   }
   $header;
 }
@@ -445,7 +425,7 @@ sub asm ($;$$) {
   if ( defined $_[1] ) {
     return
       if $_[1] eq "0"
-        and $_[0] !~ /^(?:ldsv|stsv|newsvx?|newpad.*|av_pushx?|av_extend|xav_flags)$/;
+        and $_[0] !~ /^(?:ldsv|stsv|newsvx?|newpadlx|av_pushx?|av_extend|xav_flags)$/;
     return if $_[1] eq "1" and $]>5.007 and $_[0] =~ /^(?:sv_refcnt)$/;
   }
   my ( $insn, $arg, $comment ) = @_;

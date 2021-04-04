@@ -1,17 +1,12 @@
 #!/bin/sh
 # test locally
-if `which perlall-maketest-m`; then
-  perlall-maketest-m
-else
-  if `which perlall-maketest`; then
-    perlall-maketest
-  else
-    perlall -m maketest -v
-  fi
-  # creates log.modules files with date added
-  #perlall --nolog -m make '-Iblib/arch -Iblib/lib t/modules.t -no-subset -no-date t/top100'
-fi
+perlall -m --nogit maketest -v
 
+# creates log.modules files with date added
+for l in `git ls-tree --name-only master|grep log.modules`; do
+    v=`perl -ne'm{^# path = .+perl(5.*)} and print $1' $l`
+    [ -n $v ] && perlall=$v perlall -m make '-Iblib/arch -Iblib/lib t/modules.t -no-date t/top100'
+done
 # t/todomod.pl
 
 # test vm's

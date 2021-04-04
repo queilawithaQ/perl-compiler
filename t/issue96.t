@@ -4,15 +4,12 @@
 use strict;
 BEGIN {
   unshift @INC, 't';
-  require TestBC;
+  require "test.pl";
 }
 use Test::More;
-use Config;
 plan tests => 3;
-#plan skip_all => 'defined &gv optimization temp. disabled'; exit;
 
-my $ITHREADS = $Config{useithreads};
-my $script = 'defined(&B::OP::name) || print q(ok)';
+my $script = 'defined(&B::OP::name) && print q(ok)';
 
 sub compile_check {
   my ($num,$b,$base,$script,$cmt) = @_;
@@ -35,13 +32,8 @@ sub compile_check {
   }
   $stderr =~ s/main::stderr.*//s;
 
-  if ($ITHREADS) { # padop, not gvop
-    like($stderr,qr/skip saving defined\(&/, "detect defined(&B::OP::name)");
-    ok(1, "#skip save *B::OP::name with padop threads");
-  } else {
-    like($stderr,qr/skip saving defined\(&B::OP::name\)/, "detect defined(&B::OP::name)");
-    like($stderr,qr/GV::save \*B::OP::name done/, "should save *B::OP::name");
-  }
+  like($stderr,qr/skip saving defined\(&B::OP::name\)/, "detect defined(&B::OP::name)");
+  like($stderr,qr/GV::save \*B::OP::name done/, "should save *B::OP::name");
   unlike($stderr,qr/GV::save &B::OP::name/, "should not save &B::OP::name");
 }
 

@@ -3,7 +3,6 @@
 use strict;
 use Test::More tests => 3;
 use Config;
-use B::C::Config;
 
 my $DEBUGGING = ($Config{ccflags} =~ m/-DDEBUGGING/);
 my $ITHREADS  = ($Config{useithreads});
@@ -21,29 +20,23 @@ close F;
 my $result;
 my $Mblib = $] < 5.007 ? "" : "-Iblib/arch -Iblib/lib"; # 5.6 Bytecode not yet released
 my $O = $] >= 5.013005 ? "-Wb=-fno-fold,-fno-warnings" : ""; # reduce bloat
-# $O = "-Wb,-fno-walkall" if $] < 5.009;
 my $runperl = $^X =~ m/\s/ ? qq{"$^X"} : $^X;
 my $expected = `$runperl $name.pl`;
 
 $result = `$runperl $Mblib blib/script/perlcc -r -B $name.pl`;
-SKIP: {
-  TODO: { #1
-    local $TODO = "Bytecode issue 24 dbm (still original compiler)"
-      if $] < 5.008001 or $result =~ /No dbm on this machine/;
-    skip "perl5.22 broke ByteLoader", 1
-      if $] > 5.021006 and !$B::C::Config::have_byteloader;
-    is($result, $expected, "Bytecode dbm fixed with r882, 1.30");
-}}
+TODO: { #1
+  local $TODO = "Bytecode issue 24 dbm (still original compiler)"
+    if $] < 5.008001 or $result =~ /No dbm on this machine/;
+  is($result, $expected, "Bytecode dbm fixed with r882, 1.30");
+}
 unlink("$name.db*");
 
 $Mblib = "-Iblib/arch -Iblib/lib" if $] < 5.007;
 TODO: { #2
-  # also fails now with my perl5.8.9-nt, missing on File::Spec::Unix::rel2abs
-  local $TODO = "B::C issue 24 dbm 5.10.0 or 5.6"
-    if $] < 5.007 or $] eq '5.010000';
-  $TODO = "no 5.26 support yet" if $] > 5.025003;
-
-  $result = `$runperl $Mblib blib/script/perlcc -r $O $name.pl`;
+  local $TODO = "B::C issue 24 dbm >=5.12thr or 5.10.0 or 5.6"
+    if ($] >= 5.012 and $ITHREADS) or $] < 5.007 or $] eq '5.010000';
+  my $stderr = " 2>&1" if ($^O !~ /^MSWin32|VMS/);
+  $result = `$runperl $Mblib blib/script/perlcc -r $O $name.pl $stderr`;
 
   if ($result =~ /No dbm on this machine/m) {
     ok(1, 'skip - No dbm on this machine');
@@ -53,23 +46,13 @@ TODO: { #2
   }
 }
 
-SKIP: {
-  # broken in 5.23.9. 5.23.8 not tested, 5.23.7 ok.
-  skip "$] panic: corrupt saved stack index", 1 if $] > 5.023007 and !$Config{usecperl};
-   
-  $result = `$runperl $Mblib blib/script/perlcc -r -O $O $name.pl`;
-
- TODO: { #3
-   use B::C ();
-   local $TODO = "B::CC issue 24 dbm >5.10" if ($] >= 5.010 and $B::C::VERSION lt '1.42_61');
-   local $TODO = "B::CC issue 24 dbm >5.18" if ($] >= 5.018 and $B::C::VERSION ge '1.45_05'
-                                                and $B::C::VERSION lt '1.45_08');
-   
-   if ($skipped) {
-     ok(1, 'skip - No dbm on this machine');
-   } else {
-     is($result, $expected, "CC dbm fixed with r881, XSLoader with 1.32");
-   }
+$result = `$runperl $Mblib blib/script/perlcc -r -O $O $name.pl`;
+TODO: { #3
+  # local $TODO = "B::CC issue 24 dbm >5.10" if $] >= 5.010;
+  if ($skipped) {
+    ok(1, 'skip - No dbm on this machine');
+  } else {
+    is($result, $expected, "CC dbm fixed with r881, XSLoader with 1.32");
   }
 }
 

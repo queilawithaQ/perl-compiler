@@ -12,7 +12,6 @@
 #  -no-date - no date added at the logfile
 #  -t       - run also tests
 #  -log     - save log file. default on test10 and without subset
-#  -keep    - keep the source, perlcc -S
 #
 # The list in t/mymodules comes from two bigger projects.
 # Recommended general lists are Task::Kensho and http://ali.as/top100/
@@ -34,21 +33,19 @@ use File::Temp;
 # Try some simple XS module which exists in 5.6.2 and blead
 # otherwise we'll get a bogus 40% failure rate
 my $staticxs = '';
-
+my $Mblib = $^O eq 'MSWin32' ? '-Iblib\arch -Iblib\lib' : "-Iblib/arch -Iblib/lib";
 BEGIN {
   $staticxs = '--staticxs';
   # check whether linking with xs works at all. Try with and without --staticxs
   if ($^O eq 'darwin') { $staticxs = ''; goto BEGIN_END; }
   my $X = $^X =~ m/\s/ ? qq{"$^X"} : $^X;
+  my $Mblib = $^O eq 'MSWin32' ? '-Iblib\arch -Iblib\lib' : "-Iblib/arch -Iblib/lib";
   my $tmp = File::Temp->new(TEMPLATE => 'pccXXXXX');
   my $out = $tmp->filename;
-  my $Mblib = $^O eq 'MSWin32' ? '-Iblib\arch -Iblib\lib' : "-Iblib/arch -Iblib/lib";
-  my $result = `$X $Mblib blib/script/perlcc -O3 --staticxs -o$out -e"use Data::Dumper;"`;
+  my $result = `$X $Mblib blib/script/perlcc --staticxs -o$out -e"use Data::Dumper;"`;
   my $exe = $^O eq 'MSWin32' ? "$out.exe" : $out;
   unless (-e $exe or -e 'a.out') {
-    my $cmd = qq($X $Mblib blib/script/perlcc -O3 -o$out -e"use Data::Dumper;");
-    warn $cmd."\n" if $ENV{TEST_VERBOSE};
-    my $result = `$cmd`;
+    my $result = `$X $Mblib blib/script/perlcc -o$out -e"use Data::Dumper;"`;
     unless (-e $out or -e 'a.out') {
       plan skip_all => "perlcc cannot link XS module Data::Dumper. Most likely wrong ldopts.";
       unlink $out;
@@ -56,14 +53,13 @@ BEGIN {
     } else {
       $staticxs = '';
     }
-  } else {
-    diag "-O3 --staticxs ok";
   }
  BEGIN_END:
   unshift @INC, 't';
 }
 
 our %modules;
+our $keep = '';
 our $log = 0;
 use modules;
 require "test.pl";
@@ -88,14 +84,13 @@ my $have_IPC_Run = defined $IPC::Run::VERSION;
 log_diag("Warning: IPC::Run is not available. Error trapping will be limited, no timeouts.")
   unless $have_IPC_Run;
 
-my @opts = ("-O3");				  # only B::C
-@opts = ("-O3", "-O", "-B") if grep /-all/, @ARGV;  # all 3 compilers
+my @opts = ("");				  # only B::C
+@opts = ("", "-O", "-B") if grep /-all/, @ARGV;  # all 3 compilers
 my $perlversion = perlversion();
 $log = 0 if @ARGV;
 $log = 1 if grep /top100$/, @ARGV;
 $log = 1 if grep /-log/, @ARGV or $ENV{TEST_LOG};
 my $nodate = 1 if grep /-no-date/, @ARGV;
-my $keep = 1 if grep /-keep/, @ARGV;
 
 if ($log) {
   $log = (@ARGV and !$nodate)
@@ -139,7 +134,6 @@ unless (is_subset) {
 
 my $module_count = 0;
 my ($skip, $pass, $fail, $todo) = (0,0,0,0);
-my $Mblib = $^O eq 'MSWin32' ? '-Iblib\arch -Iblib\lib' : "-Iblib/arch -Iblib/lib";
 
 MODULE:
 for my $module (@modules) {
@@ -187,16 +181,13 @@ for my $module (@modules) {
       my ($result, $stdout, $err);
       my $module_passed = 1;
       my $runperl = $^X =~ m/\s/ ? qq{"$^X"} : $^X;
-      foreach (0..$#opts) {
-        my $opt = $opts[$_];
-        $opt .= " --testsuite --no-spawn" if $module =~ /^Test::/ and $opt !~ / --testsuite/;
-        $opt .= " -S" if $keep and $opt !~ / -S\b/;
+      foreach my $opt (@opts) {
+        $opt .= " $keep" if $keep;
         # TODO ./a often hangs but perlcc not
         my @cmd = grep {!/^$/}
 	  $runperl,split(/ /,$Mblib),"blib/script/perlcc",split(/ /,$opt),$staticxs,"-o$out","-r",$out_pl;
-        my $cmd = join(" ", @cmd);
-        #warn $cmd."\n" if $ENV{TEST_VERBOSE};
-	# Esp. darwin-2level has insane link times
+        my $cmd = "$runperl $Mblib blib/script/perlcc $opt $staticxs -o$out -r"; # only for the msg
+	# My Macbook Air with gcc-mp and with 1GB RAM has insane compile times
         ($result, $stdout, $err) = run_cmd(\@cmd, 720); # in secs.
         ok(-s $out,
            "$module_count: use $module  generates non-zero binary")
@@ -205,21 +196,14 @@ for my $module (@modules) {
           or $module_passed = 0;
 	$err =~ s/^Using .+blib\n//m if $] < 5.007;
         like($stdout, qr/ok$/ms, "$module_count: use $module $opt gives expected 'ok' output");
-        #warn $stdout."\n" if $ENV{TEST_VERBOSE};
-        #warn $err."\n" if $ENV{TEST_VERBOSE};
         unless ($stdout =~ /ok$/ms) { # crosscheck for a perlcc problem (XXX not needed anymore)
-          warn "crosscheck without perlcc\n" if $ENV{TEST_VERBOSE};
           my ($r, $err1);
           $module_passed = 0;
-          my $c_opt = $opts[$_];
-          @cmd = ($runperl,split(/ /,$Mblib),"-MO=C,$c_opt,-o$out_c",$out_pl);
-          #warn join(" ",@cmd."\n") if $ENV{TEST_VERBOSE};
+          @cmd = ($runperl,$Mblib,"-MO=C,-o$out_c",$out_pl);
           ($r, $stdout, $err1) = run_cmd(\@cmd, 60); # in secs
-          @cmd = ($runperl,split(/ /,$Mblib),"script/cc_harness","-o$out",$out_c);
-          #warn join(" ",@cmd."\n") if $ENV{TEST_VERBOSE};
+          @cmd = ($runperl,$Mblib,"script/cc_harness","-o$out",$out_c);
           ($r, $stdout, $err1) = run_cmd(\@cmd, 360); # in secs
           @cmd = ($^O eq 'MSWin32' ? "$out" : "./$out");
-          #warn join(" ",@cmd."\n") if $ENV{TEST_VERBOSE};
           ($r, $stdout, $err1) = run_cmd(\@cmd, 20); # in secs
           if ($stdout =~ /ok$/ms) {
             $module_passed = 1;
@@ -270,32 +254,18 @@ sub is_todo {
   my $module = shift or die;
   my $DEBUGGING = ($Config{ccflags} =~ m/-DDEBUGGING/);
   # ---------------------------------------
-  #foreach(qw(
+  foreach(qw(
+    Module::Build
+  )) { return 'overlong linking time' if $_ eq $module; }
+  foreach(qw(
+      Test::NoWarnings
+  )) { return 'print() on unopened filehandle $Testout' if $_ eq $module; }
+  #if ($] < 5.007) { foreach(qw(
   #  ExtUtils::CBuilder
-  #)) { return 'overlong linking time' if $_ eq $module; }
-  if ($] < 5.007) { foreach(qw(
-    Sub::Name
-    Test::Simple
-    Test::Exception
-    Storable
-    Test::Tester
-    Test::NoWarnings
-    Moose
-    Test::Warn
-    Test::Pod
-    Test::Deep
-    FCGI
-    MooseX::Types
-    DateTime::TimeZone
-    DateTime
-  )) { return '5.6' if $_ eq $module; }}
+  #)) { return '5.6' if $_ eq $module; }}
   if ($] >= 5.008004 and $] < 5.0080006) { foreach(qw(
     Module::Pluggable
   )) { return '5.8.5 CopFILE_set' if $_ eq $module; }}
-  # PMOP quoting fixed with 1.45_14
-  #if ($] < 5.010) { foreach(qw(
-  #  DateTime
-  #)) { return '<5.10' if $_ eq $module; }}
   # restricted v_string hash?
   if ($] eq '5.010000') { foreach(qw(
    IO
@@ -303,55 +273,60 @@ sub is_todo {
    DateTime::TimeZone
   )) { return '5.10.0 restricted hash/...' if $_ eq $module; }}
   # fixed between v5.15.6-210-g5343a61 and v5.15.6-233-gfb7aafe
-  #if ($] > 5.015 and $] < 5.015006) { foreach(qw(
-  # B::Hooks::EndOfScope
-  #)) { return '> 5.15' if $_ eq $module; }}
-  if ($] >= 5.018) { foreach(qw(
-      ExtUtils::ParseXS
-  )) { return '>= 5.18 #137 Eval-group not allowed at runtime' if $_ eq $module; }}
-  # DateTime fixed with 1.52_13
-  # stringify fixed with 1.52_18
-  #if ($] >= 5.018) { foreach(qw(
-  #    Path::Class
-  #)) { return '>= 5.18 #219 overload stringify regression' if $_ eq $module; }}
-  if ($] >= 5.023005) { foreach(qw(
-      Attribute::Handlers
-      MooseX::Types
-  )) { return '>= 5.23.5 SEGV' if $_ eq $module; }}
+  if ($] > 5.015 and $] < 5.015006) { foreach(qw(
+   B::Hooks::EndOfScope
+  )) { return '> 5.15' if $_ eq $module; }}
+  #if ($] > 5.015) { foreach(qw(
+  #    Moose
+  #    MooseX::Types
+  #    DateTime
+  #)) { return '> 5.15 (unshare_hek)' if $_ eq $module; }}
 
   # ---------------------------------------
   if ($Config{useithreads}) {
-    if ($] >= 5.008008 and $] < 5.008009) { foreach(qw(
+    if (!$DEBUGGING) { foreach(qw(
       Test::Tester
-    )) { return '5.8.8 with threads' if $_ eq $module; }}
-    if ($] >= 5.010 and $] < 5.011 and $DEBUGGING) { foreach(qw(
-      Attribute::Handlers
-    )) { return '5.10.1d with threads' if $_ eq $module; }}
-    #if ($] >= 5.012 and $] < 5.014) { foreach(qw(
-    #  ExtUtils::CBuilder
-    #)) { return '5.12 with threads' if $_ eq $module; }}
-    if ($] >= 5.016 and $] < 5.018) { foreach(qw(
+    )) { return 'non-debugging with threads' if $_ eq $module; }}
+    if ($] >= 5.008005 and $] < 5.008006) { foreach(qw(
       Module::Build
-    )) { return '5.16 threaded (out of memory)' if $_ eq $module; }}
-    #if ($] >= 5.022) { foreach(qw(
-    #)) { return '>= 5.22 with threads SEGV' if $_ eq $module; }}
-    #if ($] >= 5.022) { foreach(qw(
-    #)) { return '>= 5.22 with threads, no ok' if $_ eq $module; }}
+      Test::NoWarnings
+      Test::Warn
+      Test::Simple
+      Test::Exception
+      Test::Tester
+      Test::Deep
+    )) { return '5.8.4-5 shared_scalar n-magic (\156)' if $_ eq $module; }}
+    if ($] > 5.008001 and $] < 5.008009) { foreach(qw(
+      Test::Pod
+    )) { return '5.8.1-5.8.8 with threads' if $_ eq $module; }}
+    if ($] >= 5.009 and $] < 5.012) { foreach(qw(
+      Carp::Clan
+      DateTime
+      Encode
+      ExtUtils::Install
+      Module::Build
+      MooseX::Types
+      Pod::Text
+      Template::Stash
+    )) { return '5.10 with threads' if $_ eq $module; }}
+    # XXX 5.12.0 not tested recently
+    if ($] eq 5.012000) { foreach(qw(
+      DBI
+      DateTime
+      DateTime::Locale
+      Filter::Util::Call
+      Storable
+      Sub::Name
+    )) { return '5.12.0 with threads' if $_ eq $module; }}
   } else { #no threads --------------------------------
-    #if ($] > 5.008008 and $] <= 5.009) { foreach(qw(
-    #  ExtUtils::CBuilder
-    #)) { return '5.8.9 without threads' if $_ eq $module; }}
-    # invalid free
-    if ($] >= 5.016 and $] < 5.018) { foreach(qw(
-        Module::Build
-    )) { return '5.16 without threads (invalid free)' if $_ eq $module; }}
-    # This is a flapping test
-    if ($] >= 5.017 and $] < 5.020) { foreach(qw(
-        Moose
-    )) { return '5.18 without threads' if $_ eq $module; }}
-    #if ($] > 5.019) { foreach(qw(
-    #  MooseX::Types
-    #)) { return '5.19 without threads' if $_ eq $module; }}
+    # This was related to aelemfast->sv with SPECIAL pads fixed with 033d200
+    if ($] > 5.008004 and $] <= 5.008005) { foreach(qw(
+      DateTime
+    )) { return '5.8.5 without threads' if $_ eq $module; }}
+    if ($] > 5.015) { foreach(qw(
+      DateTime::TimeZone
+      Module::Build
+    )) { return '> 5.15 without threads' if $_ eq $module; }}
   }
   # ---------------------------------------
 }

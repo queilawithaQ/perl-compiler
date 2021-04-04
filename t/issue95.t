@@ -1,22 +1,21 @@
 #! /usr/bin/env perl
 # http://code.google.com/p/perl-compiler/issues/detail?id=95
-# IO::Socket::blocking method found in \@ISA
-# methods not found. see t/testc.sh -DCsP,-v -O0 95
+# methods not found in no ISA in any candidate. see t/testc.sh -DCsP,-v -O0 95
+# not enough candidates.
 use strict;
 BEGIN {
   unshift @INC, 't';
-  require TestBC;
+  require "test.pl";
 }
 use Test::More;
-use Config;
-eval "use IO::Socket::SSL";
+eval "require IO::Socket::SSL;";
 if ($@) {
   plan skip_all => "IO::Socket::SSL required for testing issue95" ;
 } else {
-  plan tests => 5;
+  plan tests => 6;
 }
 
-my $issue = <<'EOF';
+my $issue = <<'EOF1';
 use IO::Socket::INET   ();
 use IO::Socket::SSL    ('inet4');
 use Net::SSLeay        ();
@@ -26,20 +25,21 @@ use Socket             ();
 my $handle = IO::Socket::SSL->new(SSL_verify_mode =>0);
 $handle->blocking(0);
 print "ok";
-EOF
+EOF1
 
-my $typed = <<'EOF';
+my $typed = <<'EOF2';
 use IO::Socket::SSL();
 my IO::Handle $handle = IO::Socket::SSL->new(SSL_verify_mode =>0);
 $handle->blocking(0);
 print "ok";
-EOF
+EOF2
 
-my $ITHREADS = $Config{useithreads};
-
-sub diagv {
-  diag @_ if $ENV{TEST_VERBOSE};
-}
+my $plain = <<'EOF3';
+package dummy;
+my $invoked_as_script = !caller();
+__PACKAGE__->script(@ARGV) if $invoked_as_script;
+sub script {my($package,@args)=@_;print "ok"}
+EOF3
 
 sub compile_check {
   my ($num,$b,$base,$script,$cmt) = @_;
@@ -49,8 +49,7 @@ sub compile_check {
   print F $script;
   close F;
   my $X = $^X =~ m/\s/ ? qq{"$^X"} : $^X;
-  $b .= ',-DCsp,-v';
-  diagv "$X -Iblib/arch -Iblib/lib -MO=$b,-o$name.c $name.pl";
+  $b .= ',-DCmsp,-v';
   my ($result,$out,$stderr) =
     run_cmd("$X -Iblib/arch -Iblib/lib -MO=$b,-o$name.c $name.pl", 20);
   unless (-e "$name.c") {
@@ -62,29 +61,13 @@ sub compile_check {
   if (!$stderr and $out) {
     $stderr = $out;
   }
-  my $notfound = $stderr =~ /blocking not found/;
-  ok(!$notfound, $cmt.', no "blocking not found" warning');
-  # check stderr for "save package_pv "blocking" for method_name"
-  my $found = $stderr =~ /save package_pv "blocking" for method_name/;
-  if ($found) {
-    $found = $stderr !~ /save method_name "IO::Socket::blocking"/;
-  }
-  $cmt = "TODO" if $] >= 5.022 and $Config{useithreads};
-  ok(!$found, $cmt.', blocking as method_name saved');
+  my $notfound = $stderr =~ /save package_pv "blocking" for method_name/;
+  ok(!$notfound, $cmt.' mixed up as package');
+  my $found = $stderr =~ /save found method_name "IO::Socket::blocking"/;
+  ok($found, $cmt.' found');
 }
 
-compile_check(1,'C,-O3,-UB','ccode95i',$issue,"untyped");
-compile_check(2,'C,-O3,-UB','ccode95i',$typed,'typed');
-
-use B::C ();
-# see #310: Warning: unable to close filehandle DATA properly
-# also: Constant subroutine HUGE_VAL redefined (5.16.3, 5.16.3-nt) #367
-my $qr = '^(ok|Warning: unable to close filehandle.*\nok|Constant subroutine HUGE_VAL redefined.*\nok)$';
-my $todo = ($B::C::VERSION lt '1.42_61') ? "TODO" : "";
-# bad: 1.956 - 1.984
-if ($IO::Socket::SSL::VERSION ge '1.956' and $IO::Socket::SSL::VERSION lt '1.984') {
-  $todo = "TODO [cpan #95452] bad IO::Socket::SSL $IO::Socket::SSL::VERSION, ";
-}
-$todo = "TODO 5.18 \#356" if $] >= 5.018; # double free or corruption
-$todo = "TODO <5.8.8" if $] < 5.008008;
-ctest(5,$qr,'C,-O3','ccode95i',$issue, $todo.' run');
+compile_check(1,'C,-O3,-UB','ccode95i',$issue,"IO::Socket::blocking method");
+compile_check(3,'C,-O3,-UB','ccode95i',$typed,'typed method'); #optimization NYI
+ctestok(5,'C,-O3,-UB','ccode95i',$issue,($]>5.015?'TODO ':'').'run');
+ctestok(6,'C,-O3,-UB','ccode95i',$plain,'find __PACKAGE__');

@@ -12,25 +12,25 @@ BEGIN {
     print "1..0 # skip - Bytecode/ByteLoader doesn't work on VMS\n";
     exit 0;
   }
-  if ($ENV{PERL_CORE}) {
-    @INC = ('t', '../../lib');
+  if ($ENV{PERL_CORE}){
+    chdir('t') if -d 't';
+    @INC = ('.', '../lib');
   } else {
-    unshift @INC, 't', "blib/arch", "blib/lib";
+    unshift @INC, 't';
+    push @INC, "blib/arch", "blib/lib";
   }
   if (($Config{'extensions'} !~ /\bB\b/) ){
     print "1..0 # Skip -- Perl configured without B module\n";
     exit 0;
   }
-  require B::C::Config;
-  if ($] > 5.021006 and !$B::C::Config::have_byteloader) {
-    print "1..0 # Skip -- perl5.22 broke ByteLoader\n";
-    exit 0;
-  }
-  require TestBC; # for run_perl()
+  #if ($Config{ccflags} =~ /-DPERL_COPY_ON_WRITE/) {
+  #  print "1..0 # skip - no COW for now\n";
+  #  exit 0;
+  #}
+  require 'test.pl'; # for run_perl()
 }
 use strict;
 my $PERL56  = ( $] <  5.008001 );
-my $PERL518 = ( $] >  5.017006 );
 my $DEBUGGING = ($Config{ccflags} =~ m/-DDEBUGGING/);
 my $ITHREADS  = $Config{useithreads};
 my $MULTI     = $Config{usemultiplicity};
@@ -57,35 +57,39 @@ my @todo = (); # 33 fixed with r802, 44 <5.10 fixed later, 27 fixed with r989
   if $] < 5.007; # CORE failures, our Bytecode 56 compiler not yet backported
 #44 fixed by moving push_begin upfront
 push @todo, (21,24..26,28,33,38..39) if $^O eq 'solaris' and $] eq '5.008008';
-push @todo, (43)   if $] >= 5.008004 and $] <= 5.008008;
+# fixed with 1.35
+#push @todo, (10,18,22,24,27..28,30,45) if $^O eq 'linux' and $] eq '5.008008';
+push @todo, (43)    if $] >= 5.008004 and $] < 5.008008;
 push @todo, (7)    if $] >= 5.008004 and $] < 5.008008 and $ITHREADS;
-push @todo, (11)   if $] > 5.008005 and $] < 5.010;
-push @todo, (27)   if $] >= 5.010 and !$ITHREADS;
-push @todo, (32)   if $] > 5.011 and $] < 5.013008; # 2x del_backref fixed with r790
+push @todo, (27,42,43) if $] >= 5.010 and $] < 5.013008;
+push @todo, (32)    if $] > 5.011 and $] < 5.013008; # 2x del_backref fixed with r790
+#push @todo, (48)   if $] > 5.013; # END block del_backref fixed with r1004
+#push @todo, (41)    if !$ITHREADS;
 # cannot store labels on windows 5.12: 21
 push @todo, (21) if $^O =~ /MSWin32|cygwin|AIX/ and $] > 5.011003 and $] < 5.013;
-push @todo, (46) if $] >= 5.012 and $] < 5.018;
-#push @todo, (41..43) if $] >= 5.010; #freebsd
-#push @todo, (7, 17..18, 21, 30, 35) if $] >= 5.018 and $ITHREADS;
-push @todo, (9,10,12,42,43) if $] >= 5.018;
+push @todo, (46) if $] >= 5.012;
+push @todo, (27) if $] >= 5.014;
+push @todo, (42..43) if $] >= 5.010; #freebsd or 64bit centos6
 
 my @skip = ();
 #push @skip, (27,32,42..43) if !$ITHREADS;
 
 my %todo = map { $_ => 1 } @todo;
 my %skip = map { $_ => 1 } @skip;
-my $Mblib = $] >= 5.008 ? "-Iblib/arch -Iblib/lib" : ""; # test also the CORE B in older perls?
-my $backend = $PERL56 ? 'Bytecode56' : 'Bytecode,-H';
+my $Mblib = $] >= 5.008 ? "-Mblib" : ""; # test also the CORE B in older perls?
+my $backend = "Bytecode";
 unless ($Mblib) { # check for -Mblib from the testsuite
   if (grep { m{blib(/|\\)arch$} } @INC) {
     $Mblib = "-Iblib/arch -Iblib/lib";  # force -Mblib via cmdline, but silent!
   }
 }
 else {
-  $backend = "-qq,$backend" if !$ENV{TEST_VERBOSE} and !$PERL56;
+  $backend = "-qq,Bytecode" unless $ENV{TEST_VERBOSE};
 }
 # $backend .= ",-fno-fold,-fno-warnings" if $] >= 5.013005;
+$backend .= ",-H" unless $PERL56;
 
+#$Bytecode = $] >= 5.007 ? 'Bytecode' : 'Bytecode56';
 #$Mblib = '' if $] < 5.007; # override harness on 5.6. No Bytecode for 5.6 for now.
 for (@tests) {
   my $todo = $todo{$cnt} ? "#TODO " : "#";
@@ -96,11 +100,8 @@ for (@tests) {
   }
   my ($script, $expect) = split />>>+\n/;
   $expect =~ s/\n$//;
-  if ($cnt == 4 and $] >= 5.018) {
-    $expect = "zz" . $expect;
-  }
   $test = "bytecode$cnt.pl";
-  open T, ">", $test; print T $script; print T "\n"; close T;
+  open T, ">$test"; print T $script; close T;
   unlink "${test}c" if -e "${test}c";
   $? = 0;
   $got = run_perl(switches => [ "$Mblib -MO=$backend,-o${test}c" ],
@@ -109,7 +110,6 @@ for (@tests) {
 		  stderr   => $PERL56 ? 1 : 0, # capture "bytecode.pl syntax ok"
 		  timeout  => 10,
 		  progfile => $test);
-  my $Byteloader = $PERL56 ? " -MByteLoader" : "";
   unless ($?) {
     # test coverage if -Dv is allowed
     if ($do_coverage and $DEBUGGING) {
@@ -117,7 +117,7 @@ for (@tests) {
 			 nolib    => $ENV{PERL_CORE} ? 0 : 1,
 			 stderr   => 1,
 			 timeout  => 20,
-			 switches => [ "$Mblib -Dv $Byteloader" ]);
+			 switches => [ "$Mblib -Dv".($PERL56 ? " -MByteLoader" : "") ]);
       for (map { /\(insn (\d+)\)/ ? $1 : undef }
 	     grep /\(insn (\d+)\)/, split(/\n/, $cov)) {
 	$insncov{$_}++;
@@ -129,7 +129,7 @@ for (@tests) {
 		    nolib    => $ENV{PERL_CORE} ? 0 : 1,
 		    stderr   => $PERL56 ? 1 : 0,
 		    timeout  => 5,
-                    switches => [ "$Mblib $Byteloader" ]);
+                    switches => [ "$Mblib".($PERL56 ? " -MByteLoader" : "") ]);
     unless ($?) {
       if ($got =~ /^$expect$/) {
 	print "ok $cnt", $todo eq '#' ? "\n" : "$todo\n";

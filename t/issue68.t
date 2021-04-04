@@ -2,13 +2,10 @@
 # http://code.google.com/p/perl-compiler/issues/detail?id=68
 # newPMOP assertion >=5.10 threaded
 use strict;
-use Test::More;
-use B::C::Config;
-Test::More->import($] <= 5.021006 || $B::C::Config::have_byteloader
-                   ? (tests => 1) : (skip_all => 'perl5.22 broke ByteLoader'));
+my $name = "ccode68i";
+use Test::More tests => 1;
 use Config;
 
-my $name = "ccode68i";
 my $source = <<'EOF';
 package A;
 sub test {
@@ -36,14 +33,15 @@ unless (-e "$name.plc") {
   print "not ok 1 #B::Bytecode failed.\n";
   exit;
 }
-my $runexe = ($] < 5.008)
+my $runexe = $] < 5.008
   ? "$runperl -MByteLoader $name.plc"
   : "$runperl $Mblib $name.plc";
 my $result = `$runexe`;
 $result =~ s/\n$//;
 
 TODO: {
-  local $TODO = "threaded >= 5.010" if $] >= 5.010 and $Config{useithreads};
+  use B::Bytecode;
+  local $TODO = "threaded >= 5.010" if $] >= 5.010 and $Config{useithreads} and $B::Bytecode::VERSION lt "1.14";
   ok($result eq $expected, "issue68 - newPMOP assert");
 }
 

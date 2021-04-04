@@ -1,44 +1,22 @@
 #! /usr/bin/env perl
 # http://code.google.com/p/perl-compiler/issues/detail?id=90
 # Magic Tie::Named::Capture <=> *main::+ main::*- and Errno vs !
-# op/leaky-magic.t: defer loading of Tie::Named::Capture and Errno to run-time
 use strict;
 BEGIN {
   unshift @INC, 't';
-  require TestBC;
+  require "test.pl";
 }
-use Test::More tests => 15;
-use B::C ();
-use Config;
-
+use Test::More tests => 9;
 my $i=0;
 sub test3 {
   my $name = shift;
   my $script = shift;
   my $cmt = join('',@_);
-  my ($todobc,$todoc,$todocc) = ("","","");
-  $todobc = 'TODO ' if $name eq 'ccode90i_c';
-  # passes BC threaded 5.10-16
-  $todobc = '' if $name eq 'ccode90i_c'
-    and $] >= 5.010 and $Config{'useithreads'};
-  if ($name eq 'ccode90i_c' and ($B::C::VERSION lt '1.42_61')) {
-    $todocc = 'TODO '; #3 CC %+ includes Tie::Hash::NamedCapture
-  } elsif ($name eq 'ccode90i_ca' and $] >= 5.010) {
-    $todocc = ''; #6 CC @+ fixed with 1.44, broken with 1.56
-    if ($B::C::VERSION gt '1.55_11') {
-      $todoc = $todocc = 'TODO ';
-    }
-  } elsif ($name eq 'ccode90i_es' and $] >= 5.026) {
-    $todocc = 'TODO '; #9 CC %!
-  #} elsif ($name eq 'ccode90i_er' and $] >= 5.010 and $Config{'useithreads'}) {
-  #  $todocc = 'TODO '; #12 CC Errno loaded automagically. fixed with 1.48
-  }
-  $todocc = 'TODO 5.24 ' if $] > 5.023007 and $i < 2 and $^V !~ /c$/;
-  $todoc = 'TODO 5.26 ' if $] > 5.025003 and $i < 2 and $^V !~ /c$/;
-  
-  plctestok($i*3+1, $name, $script, $todobc."BC ".$cmt);
-  ctestok($i*3+2, "C,-O3", $name, $script, $todoc."C $cmt");
-  ctestok($i*3+3, "CC", $name, $script, $todocc."CC $cmt");
+  my $todo;
+  $todo = 'TODO %+ setting regdata magic crashes' if $name eq 'ccode90i_c';
+  plctestok($i*3+1, $name, $script, $todo);
+  ctestok($i*3+2, "C", $name, $script, "C $cmt");
+  ctestok($i*3+3, "CC", $name, $script, "CC $cmt");
   $i++;
 }
 
@@ -52,23 +30,16 @@ print q(o) if $s eq 'string test';
 'test string' =~ /(?<first>\w+) (?<second>\w+)/;
 print q(k) if $+{first} eq 'test';
 EOF
-}
 
-test3('ccode90i_ca', <<'EOF', '@+');
-"abc" =~ /(.)./; print "ok" if "21" eq join"",@+;
-EOF
+}
 
 test3('ccode90i_es', <<'EOF', '%! magic');
 my %errs = %!; # t/op/magic.t Errno compiled in
 print q(ok) if defined ${"!"}{ENOENT};
 EOF
 
-# %{"!"} detected at compile-time
-test3('ccode90i_er', <<'EOF', 'Errno loaded automagically');
+# this fails so far, %{"!"} is not detected at compile-time. requires -uErrno
+test3('ccode90i_er', <<'EOF', 'TODO may require -uErrno');
 my %errs = %{"!"}; # t/op/magic.t Errno to be loaded at run-time
 print q(ok) if defined ${"!"}{ENOENT};
-EOF
-
-test3('ccode90i_ep', <<'EOF', '%! pure IV');
-print FH "foo"; print "ok" if $! == 9;
 EOF

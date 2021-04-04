@@ -1,58 +1,34 @@
 language: "perl"
-sudo: false
 perl:
-  - "5.24"
-  - "5.22"
-  - "5.14"
-  - "5.24-dbg"
-  - "5.28"
-  - "5.26"
-  - "5.20"
-  - "5.18"
-  - "5.16"
-  - "5.12"
-  - "5.10"
-  - "5.8"
-  #- "5.14-thr"
-  - "5.22-thr"
-  #- "dev"
-  #- "blead"
+#   - "5.10"
+    - "5.12"
+    - "5.14"
+    - "5.16"
+install: "echo"
+before_script:
+#   - sudo apt-get install libffi-dev libicu-dev libgmp3-dev clang llvm-dev zlib1g-dev gcc-multilib
+# No, we are not going to run the tests for all these dependencies on every commit
+    - cpanm -n IPC::Run B::Flags Opcodes IO::Socket::SSL LWP::UserAgent 
+# This stuff used to be required, but was rolled into the Travis CI perl support.
+#    - curl -L http://cpanmin.us | sudo perl - --self-upgrade
+#    - export CI_USER=$USER
+#    - mkdir ~/perl5 && perl -Mlocal::lib >> /tmp/local_lib_junk.sh && source /tmp/local_lib_junk.sh
+#    - sudo chown -R $CI_USER ~/.cpanm
+#    - sudo chown -R $CI_USER ~/perl5
 
-# "cperl-5.24.0"/"5.24c" not yet
+# Don't run Configure.pl tests, for now
+#script: "perl Configure.pl --test=build $PARROT_CONFIG_ARGS $PARROT_OPTIMIZE --cc=\"$CC\" --link=\"$CC\" --ld=\"$CC\" --ccflags='-g' ; make $PARROT_TEST"
 
-# fast_finish: http://blog.travis-ci.com/2013-11-27-fast-finishing-builds/
-matrix:
-  fast_finish: true
-  allow_failures:
-    - perl: "5.28"
-    - perl: "5.26"
-    - perl: "5.24-dbg"
-    - perl: "5.22-thr"
-    - perl: "5.8"
-    - perl: "5.28.1c"
-    - perl: "5.26.4c"
-    #- perl: "blead"
-
-before_install:
-  - mkdir /home/travis/bin || true
-  - ln -s `which true` /home/travis/bin/cpansign
-  - rm t/CORE/v5.14/C-COMPILED/{testc,template}.pl
-  - eval $(curl https://travis-perl.github.io/init) --auto
-
-install:
-  - export COVERAGE=0 AUTOMATED_TESTING=1
-  - cpan-install --deps
-  - cpan-install IPC::Run B::Flags Opcodes IO::Socket::SSL JSON::XS LWP::UserAgent
-  - cpan-install Net::SSLeay Net::LibIDN Net::IDN::Encode Net::DNS EV
-  - cpan-install Coro || cpan-install RURBAN/Coro-6.4801.tar.gz
-
-script: "perl Makefile.PL && make && make testfast"
+script: "perl Makefile.PL && make && make test"
 
 notifications:
-  irc: "irc.perl.org#compiler"
   recipients:
     - perl-compiler@googlegroups.com
   email:
     on_success: change
     on_failure: always
-
+  irc:
+    channels:
+      - "irc.perl.org#compiler"
+    on_success: change
+    on_failure: change

@@ -3,11 +3,7 @@
 # v5.15 Bytecode Attempt to access disallowed key 'strict/subs' in a restricted hash
 use strict;
 my $name = "ccode98i";
-use Test::More;
-use B::C::Config;
-Test::More->import($] <= 5.021006 || $B::C::Config::have_byteloader
-                   ? (tests => 1) : (skip_all => 'perl5.22 broke ByteLoader'));
-use Config;
+use Test::More tests => 1;
 
 # New bug reported by Zloysystem
 # This is common-sense.pm

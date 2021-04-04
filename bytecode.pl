@@ -87,7 +87,7 @@ use B qw(@optype @specialsv_name);
 @specialsv_name = qw(Nullsv &PL_sv_undef &PL_sv_yes &PL_sv_no pWARN_ALL pWARN_NONE);
 ';
 } else {
-    print ASMDATA_PM 'our(%insn_data, @insn_name, @optype, @specialsv_name);
+    print ASMDATA_PM 'my(%insn_data, @insn_name, @optype, @specialsv_name);
 
 @optype = qw(OP UNOP BINOP LOGOP LISTOP PMOP SVOP PADOP PVOP LOOP COP);
 @specialsv_name = qw(Nullsv &PL_sv_undef &PL_sv_yes &PL_sv_no pWARN_ALL pWARN_NONE);
@@ -155,7 +155,6 @@ bset_obj_store(pTHX_ struct byteloader_state *bstate, void *obj, I32 ix)
 int bytecode_header_check(pTHX_ struct byteloader_state *bstate, U32 *isjit) {
     U32 sz = 0;
     strconst str;
-    char *version;
 
     BGET_U32(sz); /* Magic: 'PLBC' or 'PLJC' */
     if (sz != 0x43424c50) {
@@ -177,16 +176,10 @@ int bytecode_header_check(pTHX_ struct byteloader_state *bstate, U32 *isjit) {
        0.07 should be able to load 0.5 (5.8.1 CORE) */
     BGET_strconst(str,16);
     strcpy(bl_header.version, str);
-    /*
-    if (strEQ(VERSION, "4.e-02"))
-        version = "0.04";
-    else
-        version = VERSION;
-    */
-    if (strNE(str, version)) {
+    if (strNE(str, VERSION)) {
         if ((strGT(str, "0.06") && strLT(str, "0.06_06")) /*|| strLT(str, "0.05")*/) {
 	    HEADER_FAIL2("Incompatible bytecode version %s, you have %s",
-		         str, version);
+		         str, VERSION);
         }
     }
 
@@ -335,7 +328,7 @@ EOT
 
 my ($idx, @insn_name, $insn_num, $ver, $insn, $lvalue, $argtype, $flags, $fundtype, $unsupp);
 my $ITHREADS = $Config{useithreads} eq 'define';
-my $MULTI = $Config{usemultiplicity} eq 'define';
+my $MULTI = $Config{useithreads} eq 'define';
 
 $insn_num = 0;
 my @data = <DATA>;
@@ -374,7 +367,7 @@ for (@data) {
 	# perl version 5.010000 => 10.000, 5.009003 => 9.003
 	# Have to round the float: 5.010 - 5 = 0.00999999999999979
 	my $pver = 0.0+(substr($],2,3).".".substr($],5));
-	if ($ver =~ /^<?8\-?/) {
+	if ($ver =~ /8(\-)?/) {
 	    $ver =~ s/8/8.001/; # as convenience for a shorter table.
 	}
 	# Add these misses to ASMDATA. TODO: To BYTERUN maybe with a translator, as the
@@ -390,8 +383,7 @@ for (@data) {
 	    $unsupp++ if $pver < $ver; # ver 10: skip if pvar lower than 10;
 	}
     }
-    # warn "unsupported $idx\t$ver\t$insn\n" if $unsupp;
-    if (!$unsupp or ($] >= 5.007 and $insn !~ /padl|xcv_name_hek/)) {
+    if (!$unsupp or ($] >= 5.007 and $insn !~ /padl/)) {
 	$insn_name[$insn_num] = $insn;
 	push @insndata, [$insn_num, $unsupp, $insn, $lvalue, $rvalcast, $argtype, $flags];
 	# Find the next unused instruction number
@@ -525,8 +517,8 @@ print BYTERUN_C <<'EOT';
 	  /* debop is not public in 5.10.0 on strict platforms like mingw and MSVC, cygwin is fine. */
 #if defined(DEBUG_t_TEST_) && !defined(_MSC_VER) && !defined(__MINGW32__) && !defined(AIX)
           if (PL_op && DEBUG_t_TEST_)
-              /* GV without the cGVOPo_gv initialized asserts. We need to skip newopx */
-              if ((insn != INSN_NEWOPX) && (insn != INSN_NEWOP) && (PL_op->op_type != OP_GV)) debop(PL_op);
+              /* XXX GV without flags will assert. We need to skip newopx ops until op_flags are set */
+              if ((insn != INSN_NEWOPX) && (insn != INSN_NEWOP)) debop(PL_op);
 #endif
         }
     }
@@ -896,8 +888,8 @@ __END__
 29 0 	xlv_targ	LvTARG(bstate->bs_sv)		svindex
 30 0 	xlv_type	LvTYPE(bstate->bs_sv)		char
 31 0 	xbm_useful	BmUSEFUL(bstate->bs_sv)		I32
-32 <19 	xbm_previous	BmPREVIOUS(bstate->bs_sv)	U16
-33 <19 	xbm_rare	BmRARE(bstate->bs_sv)		U8
+32 0 	xbm_previous	BmPREVIOUS(bstate->bs_sv)	U16
+33 0 	xbm_rare	BmRARE(bstate->bs_sv)		U8
 34 0 	xfm_lines	FmLINES(bstate->bs_sv)		IV
 #35 0 	comment		arg				comment_t
 36 0 	xio_lines	IoLINES(bstate->bs_sv)		IV
@@ -1030,6 +1022,7 @@ __END__
 147 8 	comppad_name	*(SV**)&PL_comppad_name		svindex
 148 8 	xgv_stash	*(SV**)&GvSTASH(bstate->bs_sv)	svindex
 149 8 	signal		bstate->bs_sv			strconst	24x
+# formfeed is deprecated
 150 8-17 formfeed	PL_formfeed			svindex
 151 9-17 op_latefree	PL_op->op_latefree		U8
 152 9-17 op_latefreed	PL_op->op_latefreed		U8
@@ -1042,12 +1035,7 @@ __END__
 157 8	gv_fetchpvn_flags bstate->bs_sv			U32		x
 # restore dup to stdio handles 0-2
 158 0 	xio_ifp		bstate->bs_sv	  		char		x
-159 10	xpvshared	bstate->bs_sv			none		x
-160 18	newpadlx	bstate->bs_sv			U8		x
-161 18	padl_name	bstate->bs_sv			svindex		x
-162 18	padl_sym	bstate->bs_sv			svindex		x
-163 18	xcv_name_hek	bstate->bs_sv			pvindex		x
-164 18	op_slabbed	PL_op->op_slabbed		U8
-165 18	op_savefree	PL_op->op_savefree		U8
-166 18	op_static	PL_op->op_static		U8
-167 19.003 op_folded	PL_op->op_folded		U8
+159 10 	xpvshared	bstate->bs_sv			none		x
+160 17.005 newpadlx	bstate->bs_sv			U8		x
+161 17.005 padl_name	bstate->bs_sv			svindex		x
+162 17.005 padl_sym	bstate->bs_sv			svindex		x

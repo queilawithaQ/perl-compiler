@@ -1,7 +1,7 @@
-# B::C::VERSION = 1.42_07 a9b3612 2012-04-13 | i71_3 hangs also with DEBUGGING <5.10
-# perlversion = 5.015007d-nt
-# path = /usr/local/bin/perl5.15.7d-nt@8129baca
-# platform = linux 64bit non-threaded debug
+# B::C::VERSION = 1.43 deb074e 2012-04-25 | Bytecode thr: remove unneeded repointer adjust
+# perlversion = 5.015009d
+# path = /usr/local/bin/perl5.15.9d-32
+# platform = linux 32bit threaded debug
 pass Exporter
 pass Text::Tabs
 pass Text::Wrap
@@ -94,15 +94,15 @@ pass XML::SAX
 pass YAML
 pass MooseX::Types
 pass Class::Singleton
-pass DateTime::TimeZone #TODO > 5.15 without threads
+pass DateTime::TimeZone
 pass DateTime::Locale
 pass DateTime
 pass IO::String
 pass AppConfig
 pass UNIVERSAL::require
 pass Template::Stash
-# 99 / 99 modules tested with B-C-1.42_07 - perl-5.015007d-nt
+# 99 / 99 modules tested with B-C-1.43 - perl-5.015009d
 # pass  99 /  99 (100.0%)
 # fail   0 /  99 (0.0%)
-# todo   1 /   0 ()
+# todo   0 /   0 ()
 # skip   0 /  99 (0.0% not installed)

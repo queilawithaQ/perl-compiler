@@ -1,4 +1,3 @@
-#define PERL_NO_GET_CONTEXT
 #include <EXTERN.h>
 #include <perl.h>
 #include <XSUB.h>
@@ -10,35 +9,15 @@
 #  define PM_GETRE(o)     ((o)->op_pmregexp)
 # endif
 #endif
-/* hack for 5.6.2: just want to know if PMf_ONCE or 0 */
-#ifndef PmopSTASHPV
-# define PmopSTASHPV(o) ((o)->op_pmflags & PMf_ONCE)
-#endif
 #ifndef RX_EXTFLAGS
 # define RX_EXTFLAGS(prog) ((prog)->extflags)
 #endif
 
-#if PERL_VERSION > 17 && (PERL_VERSION < 19 || (PERL_VERSION == 19 && PERL_SUBVERSION < 4))
-#define need_op_slabbed
-#endif
-#if PERL_VERSION == 19 && (PERL_SUBVERSION > 2 && PERL_SUBVERSION <= 4)
-#define need_op_folded
-#endif
-
 typedef struct magic  *B__MAGIC;
-#if PERL_VERSION > 17
-typedef PADNAME       *B__PADNAME;
-#endif
-#if PERL_VERSION > 21
-typedef PADLIST       *B__PADLIST;
-typedef PADNAMELIST   *B__PADNAMELIST;
-#endif
 #if PERL_VERSION >= 11
 typedef struct p5rx  *B__REGEXP;
 #endif
 typedef COP  *B__COP;
-typedef OP   *B__OP;
-typedef HV   *B__HV;
 
 STATIC U32 a_hash = 0;
 
@@ -47,77 +26,10 @@ typedef struct {
   IV  require_tag;
 } a_hint_t;
 
-#if PERL_VERSION >= 10
-
-static const char* const svclassnames[] = {
-    "B::NULL",
-#if PERL_VERSION < 19
-    "B::BIND",
-#endif
-    "B::IV",
-    "B::NV",
-#if PERL_VERSION <= 10
-    "B::RV",
-#endif
-    "B::PV",
-#if PERL_VERSION >= 19
-    "B::INVLIST",
-#endif
-    "B::PVIV",
-    "B::PVNV",
-    "B::PVMG",
-#if PERL_VERSION >= 11
-    "B::REGEXP",
-#endif
-    "B::GV",
-    "B::PVLV",
-    "B::AV",
-    "B::HV",
-    "B::CV",
-    "B::FM",
-    "B::IO",
-};
-
-#define MY_CXT_KEY "B::C::_guts" XS_VERSION
-
-typedef struct {
-    int		x_walkoptree_debug;	/* Flag for walkoptree debug hook */
-    SV *	x_specialsv_list[7];
-} my_cxt_t;
-
-START_MY_CXT
-
-#define walkoptree_debug	(MY_CXT.x_walkoptree_debug)
-#define specialsv_list		(MY_CXT.x_specialsv_list)
-
-static SV *
-make_sv_object(pTHX_ SV *sv)
-{
-    SV *const arg = sv_newmortal();
-    const char *type = 0;
-    IV iv;
-    dMY_CXT;
-
-    for (iv = 0; iv < (IV)(sizeof(specialsv_list)/sizeof(SV*)); iv++) {
-	if (sv == specialsv_list[iv]) {
-	    type = "B::SPECIAL";
-	    break;
-	}
-    }
-    if (!type) {
-	type = svclassnames[SvTYPE(sv)];
-	iv = PTR2IV(sv);
-    }
-    sv_setiv(newSVrv(arg, type), iv);
-    return arg;
-}
-
-#endif
-
 static int
 my_runops(pTHX)
 {
-    HV* regexp_hv = get_hv( "B::C::Regexp", GV_ADD );
+    HV* regexp_hv = get_hv( "B::C::Regexp", 0 );
     SV* key = newSViv( 0 );
 
     DEBUG_l(Perl_deb(aTHX_ "Entering new RUNOPS level (B::C)\n"));
@@ -144,17 +56,7 @@ my_runops(pTHX)
 #endif
 	}
 
-        /* Need to store the rx all for QR PMOPs in a global %Regexp hash. MATCH once also */
-#if 1
-        if ((PL_op->op_type == OP_QR)
-        || ((PL_op->op_type == OP_MATCH) && PmopSTASHPV((PMOP*)PL_op)))
-#else
-        if ((PL_op->op_type == OP_QR)
-         || (PL_op->op_type == OP_MATCH)
-         || (PL_op->op_type == OP_PUSHRE)
-         || (PL_op->op_type == OP_SUBST))
-#endif
-        {
+        if( PL_op->op_type == OP_QR ) {
             PMOP* op;
             REGEXP* rx = PM_GETRE( (PMOP*)PL_op );
             SV* rv = newSViv( 0 );
@@ -180,9 +82,7 @@ my_runops(pTHX)
 
             sv_setiv( key, PTR2IV( rx ) );
             sv_setref_iv( rv, "B::PMOP", PTR2IV( op ) );
-#if defined(DEBUGGING) && (PERL_VERSION > 7)
-	    if (DEBUG_D_TEST_) fprintf(stderr, "pmop %p => rx %p\n", op, rx);
-#endif
+
             hv_store_ent( regexp_hv, key, rv, 0 );
         }
     } while ((PL_op = CALL_FPTR(PL_op->op_ppaddr)(aTHX)));
@@ -215,118 +115,6 @@ precomp(mg)
 
 #endif
 
-MODULE = B	PACKAGE = B::PMOP
-
-#if defined(RX_UTF8) && PERL_VERSION < 20
-
-SV*
-precomp(o)
-      B::OP o
-  PPCODE:
-    if (o) {
-      REGEXP *rx = PM_GETRE(cPMOPo);
-      if (!rx)
-        XSRETURN_UNDEF;
-      ST(0) = sv_2mortal(newSVpvn_flags(RX_PRECOMP(rx), RX_PRELEN(rx), RX_UTF8(rx) ? SVf_UTF8 : 0));
-      XSRETURN(1);
-    } else {
-      XSRETURN_UNDEF;
-    }
-
-#endif
-
-MODULE = B      PACKAGE = B::HV
-
-#if PERL_VERSION > 13
-
-# returns a single or multiple ENAME(s), since 5.14
-void
-ENAMES(hv)
-    B::HV hv
-PPCODE:
-    if (SvOOK(hv)) {
-      if (HvENAME_HEK(hv)) {
-        const I32 count = HvAUX(hv)->xhv_name_count;
-        if (count) {
-          HEK** names = HvAUX(hv)->xhv_name_u.xhvnameu_names;
-          HEK *const *hekp = names + (count < 0 ? 1 : 0);
-          HEK *const *const endp = names + (count < 0 ? -count : count);
-          while (hekp < endp) {
-            assert(*hekp);
-            PUSHs(newSVpvn_flags(HEK_KEY(*hekp), HEK_LEN(*hekp),
-                                 HEK_UTF8(*hekp) ? SVf_UTF8|SVs_TEMP : SVs_TEMP));
-            ++hekp;
-          }
-          XSRETURN(count < 0 ? -count : count);
-        }
-        else {
-          HEK *const hek = HvENAME_HEK_NN(hv);
-          ST(0) = newSVpvn_flags(HEK_KEY(hek), HEK_LEN(hek),
-                                 HEK_UTF8(hek) ? SVf_UTF8|SVs_TEMP : SVs_TEMP);
-          XSRETURN(1);
-        }
-      }
-    }
-    XSRETURN_UNDEF;
-
-I32
-name_count(hv)
-    B::HV hv
-PPCODE:
-    if (SvOOK(hv))
-      PUSHi(HvAUX(hv)->xhv_name_count);
-    else 
-      PUSHi(0);
-
-#endif
-
-#if PERL_VERSION > 17
-
-SV*
-SvSTASH(hv)
-    B::HV hv
-  PPCODE:
-    HV* stash = SvSTASH(MUTABLE_SV(hv)); /* [perl #126410] */
-    if ((char*)stash < (char*)PL_sv_arenaroot) {
-      XSRETURN_UNDEF;
-    } else {
-      ST(0) = make_sv_object(aTHX_ MUTABLE_SV(stash));
-      XSRETURN(1);
-    }
-
-#endif
-
-#if PERL_VERSION > 21
-
-MODULE = B	PACKAGE = B::PADNAME	PREFIX = Padname
-
-int
-PadnameGEN(padn)
-	B::PADNAME	padn
-    CODE:
-        RETVAL = padn->xpadn_gen;
-    OUTPUT:
-	RETVAL
-
-MODULE = B	PACKAGE = B::PADLIST	PREFIX = Padlist
-
-U32
-PadlistID(padlist)
-	B::PADLIST	padlist
-    ALIAS: B::PADLIST::OUTID = 1
-    CODE:
-        RETVAL = ix ? padlist->xpadl_outid : padlist->xpadl_id;
-    OUTPUT:
-	RETVAL
-
-MODULE = B	PACKAGE = B::PADNAMELIST	PREFIX = Padnamelist
-
-size_t
-PadnamelistMAXNAMED(padnl)
-	B::PADNAMELIST	padnl
-
-#endif
-
 MODULE = B	PACKAGE = B::REGEXP	PREFIX = RX_
 
 #if PERL_VERSION > 10
@@ -349,33 +137,14 @@ COP_stashflags(o)
 
 #endif
 
-#ifdef CopLABEL_len_flags
-
-SV*
-COP_label(o)
-    B::OP  o
-  PPCODE:
-    {
-      STRLEN len;
-      U32 flags;
-      const char *pv = CopLABEL_len_flags(cCOPo, &len, &flags);
-      ST(0) = pv ? sv_2mortal(newSVpvn_flags(pv, len, flags))
-                 : &PL_sv_undef;
-    }
-    XSRETURN(1);
-
-#endif
-
 MODULE = B__CC	PACKAGE = B::CC
 
 PROTOTYPES: DISABLE
 
-# Perl_ck_null is not exported on Windows, so disable autovivification optimizations there
-
 U32
 _autovivification(cop)
 	B::COP	cop
-  CODE:
+CODE:
     {
       SV *hint;
       IV h;
@@ -404,145 +173,9 @@ _autovivification(cop)
 OUTPUT:
   RETVAL
 
-
-MODULE = B__OP	PACKAGE = B::OP		PREFIX = op_
-
-#ifdef need_op_slabbed
-
-I32
-op_slabbed(op)
-        B::OP        op
-    PPCODE:
-	PUSHi(op->op_slabbed);
-
-I32
-op_savefree(op)
-        B::OP        op
-    PPCODE:
-	PUSHi(op->op_savefree);
-
-I32
-op_static(op)
-        B::OP        op
-    PPCODE:
-	PUSHi(op->op_static);
-
-#endif
-
-#ifdef need_op_folded
-
-I32
-op_folded(op)
-        B::OP        op
-    PPCODE:
-	PUSHi(op->op_folded);
-
-#endif
-
-MODULE = B	PACKAGE = B::HV		PREFIX = Hv
-
-#if PERL_VERSION >= 10
-
-void
-HvARRAY_utf8(hv)
-	B::HV	hv
-    PPCODE:
-	if (HvKEYS(hv) > 0) {
-	    HE *he;
-	    (void)hv_iterinit(hv);
-	    EXTEND(sp, HvKEYS(hv) * 2);
-	    while ((he = hv_iternext(hv))) {
-                if (HeSVKEY(he)) {
-                    mPUSHs(HeSVKEY(he));
-                } else if (HeKUTF8(he)) {
-                    PUSHs(newSVpvn_flags(HeKEY(he), HeKLEN(he), SVf_UTF8|SVs_TEMP));
-                } else {
-                    PUSHs(newSVpvn_flags(HeKEY(he), HeKLEN(he), SVs_TEMP));
-                }
-		PUSHs(make_sv_object(aTHX_ HeVAL(he)));
-	    }
-	}
-
-#endif
-
 MODULE = B__C	PACKAGE = B::C
 
 PROTOTYPES: DISABLE
 
-#if PERL_VERSION >= 11
-
-CV*
-method_cv(meth, packname)
-        SV* meth;
-	char *packname;
-   CODE:
-	U32 hash;
-    	HV* stash; /* XXX from op before, also on the run-time stack */
-        GV* gv;
-	hash = SvSHARED_HASH(meth);
-        stash = gv_stashpv(packname, TRUE);
-	if (hash) {
-          const HE* const he = hv_fetch_ent(stash, meth, 0, hash);
-          if (he) {
-	    gv = MUTABLE_GV(HeVAL(he));
-	    if (isGV(gv) && GvCV(gv) &&
-		(!GvCVGEN(gv) || GvCVGEN(gv)
-                 == (PL_sub_generation + HvMROMETA(stash)->cache_gen)))
-              RETVAL = (CV*)MUTABLE_SV(GvCV(gv));
-              return;
-          }
-        }
-        /* public API since 5.11 */
-	gv = gv_fetchmethod_flags(stash,
-			      SvPV_nolen_const(meth),
-			      GV_AUTOLOAD | GV_CROAK);
-    	assert(gv);
-    	RETVAL = isGV(gv) ? (CV*)MUTABLE_SV(GvCV(gv)) : (CV*)MUTABLE_SV(gv);
-    OUTPUT:
-        RETVAL
-
-#endif
-
-MODULE = B__C		PACKAGE = B::C
-
-#if PERL_VERSION >= 10
-
-SV*
-get_linear_isa(classname)
-    SV* classname;
-CODE:
-    HV *class_stash = gv_stashsv(classname, 0);
-
-    if (!class_stash) {
-        /* No stash exists yet, give them just the classname */
-        AV* isalin = newAV();
-        av_push(isalin, newSVsv(classname));
-        RETVAL = newRV(MUTABLE_SV(isalin));
-    }
-    else { /* just dfs */
-      RETVAL = newRV(MUTABLE_SV(Perl_mro_get_linear_isa(aTHX_ class_stash)));
-    }
-OUTPUT:
-    RETVAL
-
-#endif
-
 BOOT:
-#if PERL_VERSION >= 10
-{
-    MY_CXT_INIT;
-#endif
     PL_runops = my_runops;
-#if PERL_VERSION >= 10
-    {
-      dMY_CXT;
-      specialsv_list[0] = Nullsv;
-      specialsv_list[1] = &PL_sv_undef;
-      specialsv_list[2] = &PL_sv_yes;
-      specialsv_list[3] = &PL_sv_no;
-      specialsv_list[4] = (SV *) pWARN_ALL;
-      specialsv_list[5] = (SV *) pWARN_NONE;
-      specialsv_list[6] = (SV *) pWARN_STD;
-    }
-}
-#endif
